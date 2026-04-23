@@ -2,7 +2,11 @@
 const state = {
   templates:[], colorRules:[], eventColors:[], logs:[], settings:{}, triggerInfo:{},
   selectedTemplateId: null,
-  journeys:[], selectedJourneyId:null, journeySteps:[]
+  journeys:[], selectedJourneyId:null, journeySteps:[],
+  // New state
+  smsTemplates:[], selectedSmsTemplateId:null,
+  candidates:[], smsLogs:[], deliveryQueue:[],
+  scanEvents:[], scanWindow:'this_month', scanFromCache:false
 };
 
 function runServer(fn, args) {
@@ -43,7 +47,24 @@ async function loadDashboard() {
     state.selectedJourneyId  = state.selectedJourneyId||(state.journeys[0]&&state.journeys[0].journey_id);
     state.journeySteps       = getSelectedJourneySteps();
     renderAll();
+    // Load extended data in background — non-blocking
+    loadExtendedData();
   } catch(e){ toast(e.message,true); }
+}
+
+async function loadExtendedData() {
+  try {
+    const [smsTpls, cands] = await Promise.all([
+      runServer('listSmsTemplates'),
+      runServer('listCandidates','pending')
+    ]);
+    state.smsTemplates        = smsTpls||[];
+    state.candidates          = cands||[];
+    state.selectedSmsTemplateId = state.selectedSmsTemplateId||(state.smsTemplates[0]&&state.smsTemplates[0].sms_template_id);
+    renderSmsTemplateList(); renderSmsTemplateEditor();
+    renderCandidates();
+    updateCandidateBadge();
+  } catch(e){ /* extended load failures are non-critical */ }
 }
 
 function renderAll() {
@@ -63,26 +84,56 @@ function renderSettings() {
   document.getElementById('fallback_parse_description').checked = String(s.fallback_parse_description)!=='false';
   document.getElementById('sender_name').value          = s.sender_name||'';
   document.getElementById('reply_to').value             = s.reply_to||'';
+  // New fields — safe: elements may not exist in old deploy, guarded
+  const set = (id,v) => { const el=document.getElementById(id); if(el) el.value=v||''; };
+  const chk = (id,v) => { const el=document.getElementById(id); if(el) el.checked=String(v)==='true'; };
+  set('twilio_account_sid',   s.twilio_account_sid);
+  set('twilio_auth_token',    s.twilio_auth_token);
+  set('twilio_from_number',   s.twilio_from_number);
+  set('twilio_messaging_sid', s.twilio_messaging_sid);
+  chk('sms_enabled',          s.sms_enabled);
+  chk('scan_cache_enabled',   s.scan_cache_enabled==='false'?'false':'true');
+  chk('identity_use_attendees',s.identity_use_attendees==='false'?'false':'true');
+  chk('identity_use_phone',   s.identity_use_phone==='false'?'false':'true');
+  const mc = document.getElementById('multi_contact_action');
+  if (mc) mc.value = s.multi_contact_action||'candidate';
+  chk('reenroll_allow_completed', s.reenroll_allow_completed==='false'?'false':'true');
+  chk('reenroll_allow_cancelled', s.reenroll_allow_cancelled==='false'?'false':'true');
 }
 
 function renderTriggerInfo() {
   const t = state.triggerInfo||{};
-  const leg = t.legacy||{}, jny = t.journey||{};
-  document.getElementById('trigger_info').textContent =
-    `Legacy trigger: ${leg.active?'ON':'OFF'} | Journey trigger: ${jny.active?'ON (hourly)':'OFF'} | Configured: ${t.configuredTime||'09:00'}`;
+  const leg = t.legacy||{}, jny = t.journey||{}, sc = t.scanCache||{};
+  const el = document.getElementById('trigger_info');
+  if (el) el.textContent =
+    `Legacy: ${leg.active?'ON':'OFF'} | Journey: ${jny.active?'ON':'OFF'} | Scan Cache: ${sc.active?'ON':'OFF'} | Time: ${t.configuredTime||'09:00'}`;
 }
 
 async function saveSettingsFromForm() {
   try {
+    const gv  = id => { const el=document.getElementById(id); return el?el.value:''; };
+    const gck = id => { const el=document.getElementById(id); return el?String(el.checked):''; };
     const res = await runServer('saveSettings',{
-      calendar_id:                   document.getElementById('calendar_id').value.trim(),
-      scan_frequency_days:           document.getElementById('scan_frequency_days').value,
-      daily_scan_time:               document.getElementById('daily_scan_time').value,
-      lookahead_hours:               document.getElementById('lookahead_hours').value,
-      automation_enabled:            String(document.getElementById('automation_enabled').checked),
-      fallback_parse_description:    String(document.getElementById('fallback_parse_description').checked),
-      sender_name:                   document.getElementById('sender_name').value,
-      reply_to:                      document.getElementById('reply_to').value
+      calendar_id:                   gv('calendar_id').trim(),
+      scan_frequency_days:           gv('scan_frequency_days'),
+      daily_scan_time:               gv('daily_scan_time'),
+      lookahead_hours:               gv('lookahead_hours'),
+      automation_enabled:            gck('automation_enabled'),
+      fallback_parse_description:    gck('fallback_parse_description'),
+      sender_name:                   gv('sender_name'),
+      reply_to:                      gv('reply_to'),
+      // New fields
+      twilio_account_sid:            gv('twilio_account_sid'),
+      twilio_auth_token:             gv('twilio_auth_token'),
+      twilio_from_number:            gv('twilio_from_number'),
+      twilio_messaging_sid:          gv('twilio_messaging_sid'),
+      sms_enabled:                   gck('sms_enabled'),
+      scan_cache_enabled:            gck('scan_cache_enabled'),
+      identity_use_attendees:        gck('identity_use_attendees'),
+      identity_use_phone:            gck('identity_use_phone'),
+      multi_contact_action:          gv('multi_contact_action'),
+      reenroll_allow_completed:      gck('reenroll_allow_completed'),
+      reenroll_allow_cancelled:      gck('reenroll_allow_cancelled')
     });
     state.settings=res.settings; state.triggerInfo=res.triggerInfo;
     renderSettings(); renderTriggerInfo(); toast('Settings saved');
@@ -552,4 +603,372 @@ async function refreshCustomerResult() {
 }
 
 window.addEventListener('DOMContentLoaded', loadDashboard);
+
+// ═══════════════════════════════════════════════════════════
+// NEW SECTIONS — appended, nothing above touched
+// ═══════════════════════════════════════════════════════════
+
+// ── Nav ──────────────────────────────────────────────────────
+function showSection(id) {
+  document.querySelectorAll('.section-view').forEach(el=>el.classList.remove('visible'));
+  document.querySelectorAll('.nav-item').forEach(el=>el.classList.remove('active'));
+  const sec = document.getElementById('sec-'+id);
+  const btn = document.getElementById('nav-'+id);
+  if (sec) sec.classList.add('visible');
+  if (btn) btn.classList.add('active');
+  // Lazy-load section data on first visit
+  if (id==='scan')      { if (!state.scanEvents.length) loadScanSection(); }
+  if (id==='candidates'){ runServer('listCandidates','pending').then(r=>{ state.candidates=r||[]; renderCandidates(); }).catch(()=>{}); }
+  if (id==='sms')       { runServer('listSmsTemplates').then(r=>{ state.smsTemplates=r||[]; renderSmsTemplateList(); renderSmsTemplateEditor(); }).catch(()=>{}); }
+  if (id==='delivery')  { loadDeliveryLogs(); }
+  if (id==='audit')     { loadAuditLog(); }
+}
+
+function updateCandidateBadge() {
+  const el = document.getElementById('nav-candidates-badge');
+  if (el) el.textContent = state.candidates.length ? '('+state.candidates.length+')' : '';
+}
+
+// ── Calendar Scan Section ─────────────────────────────────────
+async function loadScanSection() {
+  const host = document.getElementById('scan_events_list');
+  if (host) host.innerHTML = '<div class="empty">Loading…</div>';
+  try {
+    const calId = state.settings.calendar_id||'primary';
+    const r = await runServer('getCalendarScan',{ calendar_id:calId, window_type:state.scanWindow });
+    state.scanEvents   = r.events||[];
+    state.scanFromCache= r.fromCache||false;
+    renderScanEvents();
+  } catch(e){ toast(e.message,true); }
+}
+
+async function refreshScanClick() {
+  const host = document.getElementById('scan_events_list');
+  if (host) host.innerHTML = '<div class="empty">Refreshing…</div>';
+  try {
+    const calId = state.settings.calendar_id||'primary';
+    const cStart= document.getElementById('scan_custom_start')?document.getElementById('scan_custom_start').value:'';
+    const cEnd  = document.getElementById('scan_custom_end')  ?document.getElementById('scan_custom_end').value:'';
+    const r = await runServer('refreshCalendarScan',{
+      calendar_id:calId, window_type:state.scanWindow,
+      custom_start:cStart, custom_end:cEnd
+    });
+    state.scanEvents   = r.events||[];
+    state.scanFromCache= false;
+    renderScanEvents();
+    toast('Calendar refreshed — '+state.scanEvents.length+' events');
+  } catch(e){ toast(e.message,true); }
+}
+
+function setScanWindow(w) {
+  state.scanWindow = w;
+  document.querySelectorAll('.scan-window-tabs button').forEach(b=>b.classList.remove('active'));
+  const btn = document.getElementById('scanwin-'+w);
+  if (btn) btn.classList.add('active');
+  const cust = document.getElementById('scan_custom_range');
+  if (cust) cust.style.display = w==='custom'?'flex':'none';
+  loadScanSection();
+}
+
+function renderScanEvents() {
+  const host = document.getElementById('scan_events_list');
+  const info = document.getElementById('scan_cache_info');
+  if (!host) return;
+  if (info) info.textContent = state.scanFromCache ? '(from cache — click Refresh to re-scan)' : '(live scan)';
+  if (!state.scanEvents.length) { host.innerHTML='<div class="empty">No events in this window.</div>'; return; }
+
+  const colorDefs = { '1':'#a4bdfc','2':'#7ae28c','3':'#dbadff','4':'#ff887c',
+    '5':'#fbd75b','6':'#ffb878','7':'#46d6db','8':'#e1e1e1','9':'#5484ed','10':'#51b749','11':'#dc2127' };
+
+  host.innerHTML = state.scanEvents.map(ev=>{
+    const col  = colorDefs[String(ev.color)] || '#e5e7eb';
+    const rule = state.colorRules.find(r=>String(r.event_color)===String(ev.color)&&String(r.active)==='true');
+    const tag  = rule ? (rule.journey_id
+      ? `<span class="delivery-badge delivery-badge-sent">Journey mapped</span>`
+      : `<span class="delivery-badge delivery-badge-pending">Template mapped</span>`)
+      : `<span class="delivery-badge delivery-badge-pending" style="background:#f3f4f6;color:#6b7280;">No rule</span>`;
+    return `<div class="scan-event-card">
+      <div class="scan-swatch" style="background:${col}"></div>
+      <div>
+        <div class="scan-event-title">${escapeHtml(ev.title)}</div>
+        <div class="scan-event-meta">${escapeHtml(ev.date)} ${escapeHtml(ev.time)}${ev.location?' · '+escapeHtml(ev.location):''}</div>
+        ${ev.attendees&&ev.attendees.length?`<div class="scan-event-meta">Attendees: ${ev.attendees.map(escapeHtml).join(', ')}</div>`:''}
+      </div>
+      <div>${tag}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── Candidates Section ────────────────────────────────────────
+function renderCandidates() {
+  const host = document.getElementById('candidates_list');
+  if (!host) return;
+  updateCandidateBadge();
+  if (!state.candidates.length) { host.innerHTML='<div class="empty">No pending candidates.</div>'; return; }
+  const jnyOpts = state.journeys.map(j=>`<option value="${j.journey_id}">${escapeHtml(j.journey_name)}</option>`).join('');
+  host.innerHTML = state.candidates.map(c=>{
+    const emails = _tryParse(c.extracted_emails,[]);
+    const phones = _tryParse(c.extracted_phones,[]);
+    const atts   = _tryParse(c.attendee_emails,[]);
+    const allContacts = [...new Set([...emails,...atts])];
+    return `<div class="candidate-card">
+      <div class="candidate-header">
+        <span class="candidate-title">${escapeHtml(c.event_title)}</span>
+        <span class="candidate-meta">${escapeHtml(String(c.event_start).split('T')[0])}</span>
+        <span class="delivery-badge delivery-badge-pending">${escapeHtml(c.status)}</span>
+      </div>
+      <div class="candidate-emails">
+        ${allContacts.length?'Emails: '+allContacts.map(escapeHtml).join(', '):'<em>No emails found</em>'}
+        ${phones.length?' &nbsp;|&nbsp; Phones: '+phones.map(escapeHtml).join(', '):''}
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:8px;align-items:end;margin-top:8px;">
+        <label style="margin:0;font-size:12px;">Resolved Email
+          <select id="cres_email_${c.candidate_id}" style="font-size:12px;">
+            <option value="">-- pick email --</option>
+            ${allContacts.map(e=>`<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('')}
+            <option value="__custom__">Custom…</option>
+          </select>
+        </label>
+        <label style="margin:0;font-size:12px;">Name
+          <input id="cres_name_${c.candidate_id}" placeholder="Customer name" style="font-size:12px;">
+        </label>
+        <label style="margin:0;font-size:12px;">Enroll in Journey
+          <select id="cres_journey_${c.candidate_id}" style="font-size:12px;">
+            <option value="">-- skip enroll --</option>${jnyOpts}
+          </select>
+        </label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <button style="width:auto;font-size:12px;padding:6px 10px;" onclick="resolveCandidate('${c.candidate_id}',false)">Resolve</button>
+          <button class="danger" style="width:auto;font-size:12px;padding:6px 10px;" onclick="ignoreCandidateClick('${c.candidate_id}')">Ignore</button>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+async function resolveCandidate(candidateId, isBulk) {
+  const emailSel = document.getElementById('cres_email_'+candidateId);
+  const nameEl   = document.getElementById('cres_name_'+candidateId);
+  const jnyEl    = document.getElementById('cres_journey_'+candidateId);
+  const email    = emailSel ? emailSel.value : '';
+  if (!email || email==='__custom__') return toast('Select a resolved email',true);
+  try {
+    await runServer('resolveCandidate',{
+      candidate_id:   candidateId,
+      resolvedEmail:  email,
+      resolvedName:   nameEl ? nameEl.value.trim() : '',
+      resolvedBy:     'admin'
+    });
+    const journeyId = jnyEl ? jnyEl.value : '';
+    if (journeyId) {
+      await runServer('enrollCustomerGuarded',{
+        customerEmail: email,
+        customerName:  nameEl ? nameEl.value.trim() : email.split('@')[0],
+        journeyId,
+        actor: 'admin'
+      });
+    }
+    state.candidates = state.candidates.filter(c=>c.candidate_id!==candidateId);
+    renderCandidates();
+    toast('Candidate resolved'+(journeyId?' and enrolled':''));
+  } catch(e){ toast(e.message,true); }
+}
+
+async function ignoreCandidateClick(candidateId) {
+  if (!confirm('Ignore this candidate?')) return;
+  try {
+    await runServer('ignoreCandidate', candidateId);
+    state.candidates = state.candidates.filter(c=>c.candidate_id!==candidateId);
+    renderCandidates();
+    toast('Ignored');
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── SMS Templates Section ─────────────────────────────────────
+function selectedSmsTemplate() {
+  return state.smsTemplates.find(t=>String(t.sms_template_id)===String(state.selectedSmsTemplateId))||null;
+}
+
+function renderSmsTemplateList() {
+  const host = document.getElementById('sms_template_list');
+  if (!host) return;
+  if (!state.smsTemplates.length) { host.innerHTML='<div class="empty">No SMS templates.</div>'; return; }
+  host.innerHTML = state.smsTemplates.map(t=>`
+    <button class="sms-template-item ${String(t.sms_template_id)===String(state.selectedSmsTemplateId)?'sel':''}"
+      onclick="pickSmsTemplate('${t.sms_template_id}')">
+      <div class="template-title">${escapeHtml(t.template_name)}</div>
+      <div class="template-meta">${String(t.active)==='true'?'Active':'Inactive'} · ${String(t.body||'').length} chars</div>
+    </button>`).join('');
+}
+
+function renderSmsTemplateEditor() {
+  const host = document.getElementById('sms_template_editor');
+  if (!host) return;
+  const t = selectedSmsTemplate();
+  if (!t) { host.innerHTML='<div class="empty">Select a template to edit.</div>'; return; }
+  const bodyLen = String(t.body||'').length;
+  host.innerHTML=`
+    <div class="grid2">
+      <label>Name<input id="sms_t_name" value="${escapeHtml(t.template_name)}"></label>
+      <label>Active<select id="sms_t_active">
+        <option value="true"  ${String(t.active)==='true' ?'selected':''}>Active</option>
+        <option value="false" ${String(t.active)==='false'?'selected':''}>Inactive</option>
+      </select></label>
+    </div>
+    <label>Body (max 1600 chars)
+      <textarea id="sms_t_body" rows="6" oninput="updateSmsCharCount()">${escapeHtml(t.body||'')}</textarea>
+      <div class="sms-char-counter" id="sms_char_count">${bodyLen}/1600 chars · ~${Math.ceil(bodyLen/160)} SMS segment(s)</div>
+    </label>
+    <p style="font-size:12px;color:#6b7280;">Placeholders: {{name}}, {{email}}, {{phone}}, {{event_title}}, {{event_date}}, {{event_time}}, {{journey_name}}, {{step_number}}</p>
+    <div class="actions">
+      <button onclick="saveCurrentSmsTemplate()">Save</button>
+      <button onclick="duplicateCurrentSmsTemplate()">Duplicate</button>
+      <button class="danger" onclick="deleteCurrentSmsTemplate()">Delete</button>
+    </div>`;
+}
+
+function updateSmsCharCount() {
+  const el = document.getElementById('sms_t_body');
+  const ct = document.getElementById('sms_char_count');
+  if (!el||!ct) return;
+  const len = el.value.length;
+  ct.textContent = `${len}/1600 chars · ~${Math.ceil(len/160)||1} SMS segment(s)`;
+  ct.className = 'sms-char-counter'+(len>1600?' sms-char-over':len>320?' sms-char-warn':'');
+}
+
+function pickSmsTemplate(id) {
+  state.selectedSmsTemplateId=id; renderSmsTemplateList(); renderSmsTemplateEditor();
+}
+
+async function newSmsTemplate() {
+  try {
+    const saved=await runServer('saveSmsTemplate',{template_name:'New SMS Template',body:'Hello {{name}}, this is a message from Wigs R Us.',active:'true'});
+    state.smsTemplates.unshift(saved); state.selectedSmsTemplateId=saved.sms_template_id;
+    renderSmsTemplateList(); renderSmsTemplateEditor(); toast('SMS template created');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function saveCurrentSmsTemplate() {
+  const t=selectedSmsTemplate(); if(!t) return;
+  try {
+    const saved=await runServer('saveSmsTemplate',{
+      sms_template_id:t.sms_template_id,
+      template_name:  document.getElementById('sms_t_name').value,
+      body:           document.getElementById('sms_t_body').value,
+      active:         document.getElementById('sms_t_active').value
+    });
+    state.smsTemplates=state.smsTemplates.map(x=>x.sms_template_id===saved.sms_template_id?saved:x);
+    renderSmsTemplateList(); renderSmsTemplateEditor(); toast('Saved');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function duplicateCurrentSmsTemplate() {
+  const t=selectedSmsTemplate(); if(!t) return;
+  try {
+    const copy=await runServer('duplicateSmsTemplate',t.sms_template_id);
+    state.smsTemplates.unshift(copy); state.selectedSmsTemplateId=copy.sms_template_id;
+    renderSmsTemplateList(); renderSmsTemplateEditor(); toast('Duplicated');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function deleteCurrentSmsTemplate() {
+  const t=selectedSmsTemplate(); if(!t) return;
+  if(!confirm('Delete this SMS template?')) return;
+  try {
+    await runServer('deleteSmsTemplate',t.sms_template_id);
+    state.smsTemplates=state.smsTemplates.filter(x=>x.sms_template_id!==t.sms_template_id);
+    state.selectedSmsTemplateId=state.smsTemplates[0]?state.smsTemplates[0].sms_template_id:null;
+    renderSmsTemplateList(); renderSmsTemplateEditor(); toast('Deleted');
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── Delivery Logs Section ─────────────────────────────────────
+async function loadDeliveryLogs() {
+  try {
+    const [smsLogs, queue] = await Promise.all([
+      runServer('listSmsLogs',200),
+      runServer('listDeliveryQueue','')
+    ]);
+    state.smsLogs      = smsLogs||[];
+    state.deliveryQueue= queue||[];
+    renderDeliveryLogs();
+  } catch(e){ toast(e.message,true); }
+}
+
+function renderDeliveryLogs() {
+  const emailHost = document.getElementById('email_delivery_table');
+  const smsHost   = document.getElementById('sms_delivery_table');
+  const queueHost = document.getElementById('retry_queue_table');
+
+  if (emailHost) {
+    const emailRows = state.logs.filter(l=>l.channel!=='sms'||!l.channel);
+    emailHost.innerHTML = emailRows.slice(0,100).map(l=>`<tr>
+      <td>${escapeHtml(String(l.timestamp).slice(0,16).replace('T',' '))}</td>
+      <td>${escapeHtml(l.recipient)}</td>
+      <td>${escapeHtml(l.subject)}</td>
+      <td><span class="delivery-badge delivery-badge-${String(l.status).toLowerCase()}">${escapeHtml(l.status)}</span></td>
+      <td>${escapeHtml(l.message)}</td>
+    </tr>`).join('') || '<tr><td colspan="5">No email logs.</td></tr>';
+  }
+
+  if (smsHost) {
+    smsHost.innerHTML = state.smsLogs.slice(0,100).map(l=>`<tr>
+      <td>${escapeHtml(String(l.timestamp).slice(0,16).replace('T',' '))}</td>
+      <td>${escapeHtml(l.phone)}</td>
+      <td>${escapeHtml(l.twilio_sid)}</td>
+      <td><span class="delivery-badge delivery-badge-${l.delivery_status==='delivered'?'sent':l.delivery_status||'pending'}">${escapeHtml(l.delivery_status||'queued')}</span></td>
+      <td>${escapeHtml(l.reply_text||'—')}</td>
+    </tr>`).join('') || '<tr><td colspan="5">No SMS logs.</td></tr>';
+  }
+
+  if (queueHost) {
+    const retries = state.deliveryQueue.filter(d=>d.status==='pending_retry'||d.status==='failed');
+    queueHost.innerHTML = retries.slice(0,50).map(d=>`<tr>
+      <td>${escapeHtml(d.channel)}</td>
+      <td>${escapeHtml(d.recipient)}</td>
+      <td>${escapeHtml(d.attempt_count)}</td>
+      <td>${escapeHtml(String(d.next_retry_at||'—').slice(0,16).replace('T',' '))}</td>
+      <td><span class="delivery-badge delivery-badge-${d.status==='failed'?'failed':'pending_retry'}">${escapeHtml(d.status)}</span></td>
+      <td>${escapeHtml(d.fail_reason)}</td>
+    </tr>`).join('') || '<tr><td colspan="6">No retries pending.</td></tr>';
+  }
+}
+
+// ── Audit Log Section ─────────────────────────────────────────
+async function loadAuditLog() {
+  try {
+    const rows = await runServer('listAuditLogs',{limit:300});
+    renderAuditLog(rows||[]);
+  } catch(e){ toast(e.message,true); }
+}
+
+function renderAuditLog(rows) {
+  const host = document.getElementById('audit_log_table');
+  if (!host) return;
+  if (!rows.length) { host.innerHTML='<tr><td colspan="7">No audit entries.</td></tr>'; return; }
+  host.innerHTML = rows.map(r=>`<tr>
+    <td>${escapeHtml(String(r.timestamp).slice(0,16).replace('T',' '))}</td>
+    <td>${escapeHtml(r.actor)}</td>
+    <td><strong>${escapeHtml(r.action)}</strong></td>
+    <td>${escapeHtml(r.customer_email)}</td>
+    <td>${escapeHtml(r.journey_name||r.journey_id)}</td>
+    <td>${escapeHtml(r.channel||'—')}</td>
+    <td>${escapeHtml(r.details)}</td>
+  </tr>`).join('');
+}
+
+async function filterAuditLog() {
+  const email   = (document.getElementById('audit_filter_email')||{}).value||'';
+  const journey = (document.getElementById('audit_filter_journey')||{}).value||'';
+  try {
+    const rows = await runServer('listAuditLogs',{ customer_email:email, journey_id:journey, limit:300 });
+    renderAuditLog(rows||[]);
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── Utility ───────────────────────────────────────────────────
+function _tryParse(str, fallback) {
+  try { const v=JSON.parse(str||'[]'); return Array.isArray(v)?v:fallback; }
+  catch(e){ return fallback; }
+}
 </script>

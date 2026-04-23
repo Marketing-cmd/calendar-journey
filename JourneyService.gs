@@ -67,14 +67,28 @@ var JourneyService = (function () {
       manual_override:      'false',
       event_data_json:      JSON.stringify(eventData),
       created_at:           now,
-      updated_at:           now
+      updated_at:           now,
+      // Extended fields — blank on old rows, populated going forward
+      journey_version: String(journey.version || '1'),
+      channel:         String(p.channel     || 'email'),
+      phone:           String(p.phone       || ''),
+      source:          String(p.source      || (p.calendarColor ? 'calendar_scan' : p.actor || 'system')),
+      staff_owner:     String(p.staffOwner  || ''),
+      notes:           String(p.notes       || ''),
+      conflict_flag:   'false'
     };
 
     SheetService.upsertJourneyState(state);
-    SheetService.addAuditLog({ actor, action:'enrolled',
-      customer_email:email, journey_id:journeyId, journey_name:journey.journey_name,
-      step_index:0, state_id:state.state_id,
-      details:'Enrolled via '+(p.calendarColor?'color: '+p.calendarColor:actor) });
+    AuditService.logEnroll({
+      actor,
+      customer_email: email,
+      journey_id:     journeyId,
+      journey_name:   journey.journey_name,
+      step_index:     0,
+      state_id:       state.state_id,
+      channel:        state.channel,
+      details:        'Enrolled via '+(p.calendarColor ? 'color: '+p.calendarColor : actor)
+    });
 
     return { ok:true, state };
   }
@@ -226,19 +240,44 @@ var JourneyService = (function () {
     }
 
     if (steps.length===0) throw new Error('Journey must have at least one step.');
-    steps.forEach(function(s){ if (!s.template_id) throw new Error('Step '+(s.step_index+1)+' has no template.'); });
+    steps.forEach(function(s,i){
+      if (!s.template_id && s.channel !== 'sms') throw new Error('Step '+(i+1)+' has no template.');
+      if (s.channel === 'sms' && !s.sms_template_id) throw new Error('Step '+(i+1)+' (SMS) has no sms_template_id.');
+    });
+
+    // Version bump: increment if editing an existing journey
+    var prevVersion = existing ? (Number(existing.version) || 1) : 0;
+    var newVersion  = payload.steps ? prevVersion + 1 : prevVersion; // only bump when steps are explicitly provided
+    if (!existing) newVersion = 1;
 
     var journey = {
-      journey_id:   id,
-      journey_name: String(payload.journey_name||(existing&&existing.journey_name)||'').trim(),
-      description:  String(payload.description||(existing&&existing.description)||'').trim(),
-      steps_json:   JSON.stringify(steps),
-      active:       String(payload.active!==undefined?payload.active:(existing?existing.active:'true'))==='true'?'true':'false',
-      created_at:   existing ? existing.created_at : now,
-      updated_at:   now
+      journey_id:        id,
+      journey_name:      String(payload.journey_name||(existing&&existing.journey_name)||'').trim(),
+      description:       String(payload.description||(existing&&existing.description)||'').trim(),
+      steps_json:        JSON.stringify(steps),
+      active:            String(payload.active!==undefined?payload.active:(existing?existing.active:'true'))==='true'?'true':'false',
+      created_at:        existing ? existing.created_at : now,
+      updated_at:        now,
+      // Extended version fields
+      version:           String(newVersion),
+      parent_journey_id: String(payload.parent_journey_id || (existing&&existing.parent_journey_id) || '')
     };
     if (!journey.journey_name) throw new Error('journey_name is required.');
     SheetService.upsertJourney(journey);
+
+    // Write version snapshot whenever steps change
+    if (payload.steps) {
+      SheetService.addJourneyVersion({
+        version_id: Utilities.getUuid(),
+        journey_id: id,
+        version:    String(newVersion),
+        steps_json: JSON.stringify(steps),
+        saved_by:   String(payload.savedBy || 'admin'),
+        saved_at:   now,
+        notes:      String(payload.versionNotes || '')
+      });
+    }
+
     return Object.assign({}, journey, { steps });
   }
 
@@ -252,8 +291,68 @@ var JourneyService = (function () {
     return { deleted: SheetService.deleteJourneyRow(id) };
   }
 
+  // ── Active Enrollment Editing ────────────────────────────────
+  function skipStep(stateId, actor) {
+    var state = SheetService.getJourneyStateById(stateId);
+    if (!state) throw new Error('JourneyState not found: '+stateId);
+    var j = SheetService.getJourneyById(state.current_journey_id);
+    if (!j)     throw new Error('Journey not found.');
+    var steps   = getSteps(j);
+    var nextIdx = Number(state.last_email_sent_step) + 2; // skip one ahead
+    var now     = SheetService.nowIso();
+    state.last_email_sent_step = String(nextIdx - 1);
+    state.updated_at           = now;
+    if (nextIdx < steps.length) {
+      state.current_status = 'active';
+      state.next_send_at   = computeNextSendAt(steps[nextIdx]);
+    } else {
+      state.current_status = 'completed';
+      state.completed_at   = now;
+      state.next_send_at   = '';
+    }
+    SheetService.upsertJourneyState(state);
+    AuditService.log({ actor: actor||'admin', action: 'step_skipped_manual',
+      customer_email: state.customer_email, journey_id: state.current_journey_id,
+      state_id: stateId, details: 'Step manually skipped to index '+nextIdx });
+    return { ok:true, state };
+  }
+
+  function moveNextSendAt(stateId, newDateIso, actor) {
+    var state = SheetService.getJourneyStateById(stateId);
+    if (!state) throw new Error('JourneyState not found: '+stateId);
+    if (!newDateIso || isNaN(new Date(newDateIso))) throw new Error('Valid ISO date required.');
+    state.next_send_at = newDateIso;
+    state.updated_at   = SheetService.nowIso();
+    SheetService.upsertJourneyState(state);
+    AuditService.log({ actor: actor||'admin', action: 'next_send_moved',
+      customer_email: state.customer_email, journey_id: state.current_journey_id,
+      state_id: stateId, details: 'Next send moved to: '+newDateIso });
+    return { ok:true, state };
+  }
+
+  function updateEnrollmentContact(stateId, params, actor) {
+    var state = SheetService.getJourneyStateById(stateId);
+    if (!state) throw new Error('JourneyState not found: '+stateId);
+    var changes = [];
+    if (params.email)    { state.customer_email = String(params.email).toLowerCase().trim(); changes.push('email'); }
+    if (params.phone)    { state.phone          = String(params.phone).trim();               changes.push('phone'); }
+    if (params.name)     { state.customer_name  = String(params.name).trim();                changes.push('name'); }
+    if (params.channel)  { state.channel        = String(params.channel).trim();             changes.push('channel'); }
+    state.updated_at = SheetService.nowIso();
+    SheetService.upsertJourneyState(state);
+    AuditService.log({ actor: actor||'admin', action: 'contact_updated',
+      customer_email: state.customer_email, journey_id: state.current_journey_id,
+      state_id: stateId, details: 'Updated: '+changes.join(', '),
+      reason: params.reason || '' });
+    return { ok:true, state };
+  }
+
+  function listJourneyVersions(journeyId) { return SheetService.listJourneyVersions(journeyId); }
+
   return {
     enroll, cancel, pause, resume, switchJourney,
-    setManualOverride, lookupCustomer, saveJourney, deleteJourney, getSteps
+    setManualOverride, lookupCustomer, saveJourney, deleteJourney, getSteps,
+    // New
+    skipStep, moveNextSendAt, updateEnrollmentContact, listJourneyVersions
   };
 })();

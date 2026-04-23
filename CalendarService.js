@@ -87,7 +87,24 @@ var CalendarService = (function () {
 
   function extractEmail(text) {
     var m = String(text||'').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
-    return m ? m[0] : '';
+    return m ? m[0].toLowerCase() : '';
+  }
+
+  // Extract ALL emails from text (returns deduplicated array)
+  function extractAllEmails(text) {
+    var matches = String(text||'').match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi) || [];
+    var seen = {};
+    return matches.map(function(e){ return e.toLowerCase().trim(); }).filter(function(e){
+      if (seen[e]) return false; seen[e] = true; return true;
+    });
+  }
+
+  // Extract first phone number from text — supports common NA formats
+  function extractPhone(text) {
+    var clean = String(text||'').replace(/[^\d\s\+\-\(\)\.]/g,'');
+    var m = clean.match(/(\+?1[\s\-\.]?)?\(?\d{3}\)?[\s\-\.]?\d{3}[\s\-\.]?\d{4}/);
+    if (!m) return '';
+    return m[0].replace(/\D/g,'');
   }
 
   function parseRecipient(title, desc, allowDesc) {
@@ -100,6 +117,55 @@ var CalendarService = (function () {
     if (!name) name = email.split('@')[0];
     return { email, name };
   }
+
+  // Full identity resolution with priority order + multi-contact detection
+  // Returns { email, name, phone, emails, phones, attendees, multiContact }
+  function resolveIdentity(event, allowDesc, attendeeList) {
+    var title = event.getTitle();
+    var desc  = event.getDescription() || '';
+
+    // Priority 1 & 2: email from title, then description
+    var titEmails  = extractAllEmails(title);
+    var descEmails = allowDesc ? extractAllEmails(desc) : [];
+    var attEmails  = (attendeeList || []).map(function(e){ return String(e).toLowerCase().trim(); }).filter(Boolean);
+
+    // Priority 3: phone from title then description
+    var phone = extractPhone(title) || (allowDesc ? extractPhone(desc) : '');
+
+    var allEmails = [];
+    titEmails.forEach(function(e){ if (allEmails.indexOf(e)<0) allEmails.push(e); });
+    descEmails.forEach(function(e){ if (allEmails.indexOf(e)<0) allEmails.push(e); });
+    attEmails.forEach(function(e){ if (allEmails.indexOf(e)<0) allEmails.push(e); });
+
+    var multiContact = allEmails.length > 1 || (allEmails.length === 1 && attEmails.length > 1);
+
+    if (allEmails.length === 0 && !phone) {
+      return { email:'', name:'', phone:'', emails:[], phones:[], attendees:attEmails, multiContact:false };
+    }
+
+    // Single clear primary
+    var primaryEmail = allEmails[0] || '';
+    var name = '';
+    if (primaryEmail) {
+      if (title.toLowerCase().indexOf(primaryEmail)>=0) {
+        name = title.replace(new RegExp(primaryEmail,'i'),'').replace(/[<>()\[\]-]/g,' ').trim();
+      }
+      if (!name) name = primaryEmail.split('@')[0];
+    }
+
+    return {
+      email:        primaryEmail,
+      name:         name,
+      phone:        phone,
+      emails:       allEmails,
+      phones:       phone ? [phone] : [],
+      attendees:    attEmails,
+      multiContact: multiContact
+    };
+  }
+
+  // Stable transition key: event ID + color — used to prevent reprocessing
+  function transitionKey(eventId, colorKey) { return eventId + '|' + colorKey; }
 
   function formatEventDateTime(event, tz) {
     var start  = event.getStartTime();
@@ -168,38 +234,51 @@ var CalendarService = (function () {
 
   // ── Journey scan: enroll / switch / cancel based on calendar color ──
   function runJourneyScan(source) {
-    var settings   = SheetService.getSettingsWithDefaults();
-    var calendarId = settings.calendar_id||'primary';
-    var allowDesc  = String(settings.fallback_parse_description||'true')==='true';
-    var tz         = Session.getScriptTimeZone();
-    var now        = new Date();
-    var winStart   = new Date(now.getTime() - 30*86400000);
-    var winEnd     = new Date(now.getTime() + 60*86400000);
+    var settings        = SheetService.getSettingsWithDefaults();
+    var calendarId      = settings.calendar_id||'primary';
+    var allowDesc       = String(settings.fallback_parse_description||'true')==='true';
+    var useAttendees    = String(settings.identity_use_attendees||'true')==='true';
+    var multiAction     = String(settings.multi_contact_action||'candidate');
+    var tz              = Session.getScriptTimeZone();
+    var now             = new Date();
+    var winStart        = new Date(now.getTime() - 30*86400000);
+    var winEnd          = new Date(now.getTime() + 60*86400000);
 
     var cal = CalendarApp.getCalendarById(calendarId);
     if (!cal) throw new Error('Calendar not found: '+calendarId);
 
     var journeyRules = getActiveJourneyRuleMap(calendarId);
     if (!Object.keys(journeyRules).length)
-      return { ok:true, source, enrolled:0, switched:0, cancelled:0, message:'No journey color rules.' };
+      return { ok:true, source, enrolled:0, switched:0, cancelled:0, candidates:0, message:'No journey color rules.' };
 
     var events   = cal.getEvents(winStart, winEnd);
     var eventMap = {};
     events.forEach(function(ev){ eventMap[ev.getId()] = { event:ev, colorKey:String(ev.getColor()) }; });
 
-    var enrolled=0, switched=0, cancelled=0;
+    // Load already-processed transition keys to avoid reprocessing
+    var processedKeys = {};
+    SheetService.listJourneyStates().forEach(function(s){
+      if (s.calendar_event_id && s.current_journey_id) {
+        processedKeys[transitionKey(s.calendar_event_id, s.current_journey_id)] = true;
+      }
+    });
 
-    // Enroll / switch for events with journey-mapped colors
+    var enrolled=0, switched=0, cancelled=0, candidates=0;
+
     events.forEach(function(event){
-      var colorKey = String(event.getColor());
-      var rule     = journeyRules[colorKey];
+      var colorKey  = String(event.getColor());
+      var rule      = journeyRules[colorKey];
       if (!rule) return;
 
       var journeyId = String(rule.journey_id);
-      var pr        = parseRecipient(event.getTitle(), event.getDescription(), allowDesc);
-      if (!pr.email) return;
+      var tKey      = transitionKey(event.getId(), journeyId);
 
-      var fmt = formatEventDateTime(event, tz);
+      var attendeeList = useAttendees
+        ? event.getGuestList().map(function(g){ return g.getEmail(); })
+        : [];
+
+      var identity = resolveIdentity(event, allowDesc, attendeeList);
+      var fmt      = formatEventDateTime(event, tz);
       var eventData = {
         event_title:   event.getTitle(),
         event_date:    fmt.dateStr,
@@ -210,16 +289,58 @@ var CalendarService = (function () {
         description:   event.getDescription()||''
       };
 
+      // No identity found at all
+      if (!identity.email && !identity.phone) {
+        if (multiAction === 'candidate') {
+          CandidateService.createCandidate({
+            calendarEventId: event.getId(), eventTitle: event.getTitle(),
+            eventStart: fmt.startIso, eventColor: colorKey,
+            rawTitle: event.getTitle(), rawDescription: event.getDescription()||'',
+            extractedEmails: identity.emails, extractedPhones: identity.phones,
+            attendeeEmails: identity.attendees
+          });
+          candidates++;
+        }
+        return;
+      }
+
+      // Multiple contacts — create candidate for admin resolution
+      if (identity.multiContact && multiAction === 'candidate') {
+        var existing = SheetService.listCandidates('pending').find(function(c){
+          return String(c.calendar_event_id) === event.getId();
+        });
+        if (!existing) {
+          CandidateService.createCandidate({
+            calendarEventId: event.getId(), eventTitle: event.getTitle(),
+            eventStart: fmt.startIso, eventColor: colorKey,
+            rawTitle: event.getTitle(), rawDescription: event.getDescription()||'',
+            extractedEmails: identity.emails, extractedPhones: identity.phones,
+            attendeeEmails: identity.attendees
+          });
+          candidates++;
+        }
+        return;
+      }
+
       var activeStates = SheetService.getActiveStatesForEvent(event.getId());
 
-      if (activeStates.length===0) {
-        var r = JourneyService.enroll({ customerEmail:pr.email, customerName:pr.name,
-          calendarEventId:event.getId(), journeyId, calendarColor:colorKey,
-          actor:'calendar_scan', eventData });
+      if (activeStates.length === 0) {
+        if (processedKeys[tKey]) return; // already enrolled for this color+journey
+        var r = EnrollmentGuard.enroll({
+          customerEmail:   identity.email,
+          customerName:    identity.name,
+          phone:           identity.phone,
+          calendarEventId: event.getId(),
+          journeyId:       journeyId,
+          calendarColor:   colorKey,
+          actor:           'calendar_scan',
+          source:          'calendar_scan',
+          eventData:       eventData
+        });
         if (r.ok) enrolled++;
       } else {
         activeStates.forEach(function(state){
-          if (String(state.current_journey_id)!==journeyId && String(state.manual_override)!=='true') {
+          if (String(state.current_journey_id) !== journeyId && String(state.manual_override) !== 'true') {
             JourneyService.switchJourney(state.state_id, journeyId, 'calendar_scan');
             switched++;
           }
@@ -227,7 +348,7 @@ var CalendarService = (function () {
       }
     });
 
-    // Cancel active states whose event is in window but color no longer maps to any journey
+    // Cancel active states whose event color no longer maps to any journey
     var allActive = SheetService.listJourneyStates().filter(function(s){
       return ['active','pending','paused'].indexOf(String(s.current_status))>=0 &&
              String(s.manual_override)!=='true';
@@ -235,21 +356,21 @@ var CalendarService = (function () {
 
     allActive.forEach(function(state){
       var entry = eventMap[state.calendar_event_id];
-      if (!entry) return; // outside window — skip
+      if (!entry) return;
       var rule = journeyRules[entry.colorKey];
       if (!rule) {
-        // Color removed or changed to non-journey color
         JourneyService.cancel(state.state_id, 'calendar_scan');
         cancelled++;
       }
-      // Color changed to different journey: handled above in enroll loop
     });
 
-    return { ok:true, source, enrolled, switched, cancelled };
+    return { ok:true, source, enrolled, switched, cancelled, candidates };
   }
 
   return {
     getEventColors, listColorRules, saveColorRule, deleteColorRule,
-    runScan, runJourneyScan
+    runScan, runJourneyScan,
+    // New helpers (used by ScanCacheService and dashboard)
+    extractAllEmails, extractPhone, resolveIdentity
   };
 })();

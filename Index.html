@@ -9,103 +9,322 @@
     <?!= include('Styles'); ?>
   </head>
   <body>
-    <div class="wrap">
-      <div class="hero">
-        <h1><?= appName ?></h1>
-        <p>Calendar color → customer journey enrollment, scheduling, and admin controls.</p>
-      </div>
+    <div class="app-shell">
 
-      <!-- Settings + Template Management -->
-      <div class="grid-main">
-        <section class="panel">
-          <h2>Scan Settings</h2>
-          <label>Google Calendar ID<input id="calendar_id" placeholder="primary"></label>
-          <div class="grid2">
-            <label>Scan Frequency (days)<input id="scan_frequency_days" type="number" min="1" value="1"></label>
-            <label>Daily Scan Time<input id="daily_scan_time" type="time" value="09:00"></label>
-          </div>
-          <div class="grid2">
-            <label>Look-Ahead (hours)<input id="lookahead_hours" type="number" min="1" value="24"></label>
-            <label>Automation Enabled<input id="automation_enabled" type="checkbox" style="width:auto;"></label>
-          </div>
-          <label><input id="fallback_parse_description" type="checkbox" style="width:auto;"> Parse email from description</label>
-          <label>Sender Name<input id="sender_name" placeholder="Calendar Automation"></label>
-          <label>Reply-To<input id="reply_to" placeholder="reply@example.com"></label>
-          <div class="toolbar">
-            <button onclick="saveSettingsFromForm()">Save Settings</button>
-            <button onclick="runScanNowClick()">Legacy Scan Now</button>
-            <button onclick="runJourneyScanNowClick()">Journey Scan Now</button>
-          </div>
-          <div class="toolbar" style="margin-top:10px;">
-            <button onclick="createTriggerClick()">Create/Update Triggers</button>
-            <button class="danger" onclick="deleteTriggerClick()">Delete Triggers</button>
-          </div>
-          <p id="trigger_info" style="margin-top:10px;font-size:12px;color:#6b7280;"></p>
-        </section>
+      <!-- ── Left Nav ── -->
+      <nav class="side-nav">
+        <div class="nav-logo"><?= appName ?></div>
+        <button id="nav-dashboard"   class="nav-item active" onclick="showSection('dashboard')">Dashboard</button>
+        <button id="nav-scan"        class="nav-item"        onclick="showSection('scan')">Calendar Scan</button>
+        <button id="nav-candidates"  class="nav-item"        onclick="showSection('candidates')">Candidates <span id="nav-candidates-badge"></span></button>
+        <button id="nav-enrollments" class="nav-item"        onclick="showSection('enrollments')">Enrollments</button>
+        <button id="nav-journeys"    class="nav-item"        onclick="showSection('journeys')">Journeys</button>
+        <button id="nav-templates"   class="nav-item"        onclick="showSection('templates')">Email Templates</button>
+        <button id="nav-sms"         class="nav-item"        onclick="showSection('sms')">SMS Templates</button>
+        <button id="nav-delivery"    class="nav-item"        onclick="showSection('delivery')">Delivery Logs</button>
+        <button id="nav-audit"       class="nav-item"        onclick="showSection('audit')">Audit Log</button>
+        <button id="nav-settings"    class="nav-item"        onclick="showSection('settings')">Settings</button>
+      </nav>
 
-        <section class="panel">
-          <h2>Template Management</h2>
-          <div class="toolbar" style="margin-bottom:10px;"><button onclick="newTemplate()">New Template</button></div>
-          <div style="display:grid;grid-template-columns:270px 1fr 1fr;gap:12px;">
-            <div><div id="template_list" class="template-list"></div></div>
-            <div id="template_editor_body"></div>
-            <div class="preview-shell">
-              <div class="preview-subject">Subject Preview: <span id="preview_subject"></span></div>
-              <div id="preview_html"></div>
-              <hr>
-              <h3 style="margin:8px 0;">Send Test Email</h3>
-              <label>Test Name<input id="test_name" value="Test User"></label>
-              <label>Test Email<input id="test_email" placeholder="test@example.com"></label>
-              <button onclick="sendTest()">Send Test Email</button>
-              <p style="font-size:12px;color:#6b7280;">Placeholders: {{name}}, {{email}}, {{event_title}}, {{event_date}}, {{event_time}}, {{journey_name}}, {{step_number}}, {{total_steps}}, {{enrolled_date}}</p>
+      <!-- ── Main Content ── -->
+      <main class="main-content">
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Dashboard
+        ════════════════════════════════════════════ -->
+        <div id="sec-dashboard" class="section-view visible">
+          <div class="page-header">
+            <h2>Dashboard</h2>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+              <button style="width:auto;" onclick="runScanNowClick()">Legacy Scan Now</button>
+              <button style="width:auto;" onclick="runJourneyScanNowClick()">Journey Scan Now</button>
             </div>
           </div>
-        </section>
-      </div>
+          <p id="trigger_info" style="font-size:12px;color:#6b7280;margin:0 0 12px;"></p>
 
-      <!-- Color Mapping -->
-      <section class="panel" style="margin-top:16px;">
-        <h2>Color Mapping</h2>
-        <p style="font-size:12px;color:#6b7280;margin:0 0 10px;">Set a <strong>Journey</strong> to enroll customers on color change. Set a <strong>Template</strong> (legacy) to send a one-off email. Journey takes priority.</p>
-        <div id="color_cards" class="color-grid"></div>
-      </section>
+          <!-- Color Mapping -->
+          <section class="panel" style="margin-bottom:16px;">
+            <h2>Color Mapping</h2>
+            <p style="font-size:12px;color:#6b7280;margin:0 0 10px;">Set a <strong>Journey</strong> to enroll customers on color change. Set a <strong>Template</strong> (legacy) to send a one-off email. Journey takes priority.</p>
+            <div id="color_cards" class="color-grid"></div>
+          </section>
 
-      <!-- Journey Manager -->
-      <section class="panel" style="margin-top:16px;">
-        <h2>Journey Manager</h2>
-        <div class="grid-journey-manager">
-          <div>
-            <div class="toolbar" style="margin-bottom:10px;"><button onclick="newJourney()">+ New Journey</button></div>
-            <div id="journey_list" class="journey-list"></div>
+          <!-- Send Logs -->
+          <section class="panel">
+            <h2>Send Logs</h2>
+            <div style="overflow:auto;">
+              <table><thead><tr>
+                <th>Timestamp</th><th>Event</th><th>Recipient</th>
+                <th>Template</th><th>Subject</th><th>Status</th><th>Message</th>
+              </tr></thead>
+              <tbody id="logs_table"></tbody></table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Calendar Scan
+        ════════════════════════════════════════════ -->
+        <div id="sec-scan" class="section-view">
+          <div class="page-header">
+            <h2>Calendar Scan</h2>
+            <button style="width:auto;" onclick="refreshScanClick()">Refresh Now</button>
           </div>
-          <div id="journey_editor"><div class="empty">Select a journey to edit, or create a new one.</div></div>
+          <div class="scan-window-tabs">
+            <button id="scanwin-this_month" class="active" onclick="setScanWindow('this_month')">This Month</button>
+            <button id="scanwin-next_month"                onclick="setScanWindow('next_month')">Next Month</button>
+            <button id="scanwin-lookahead"                 onclick="setScanWindow('lookahead')">Look-Ahead</button>
+            <button id="scanwin-custom"                    onclick="setScanWindow('custom')">Custom Range</button>
+          </div>
+          <div id="scan_custom_range" style="display:none;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">
+            <label style="margin:0;font-size:13px;">Start <input id="scan_custom_start" type="date" style="width:auto;"></label>
+            <label style="margin:0;font-size:13px;">End   <input id="scan_custom_end"   type="date" style="width:auto;"></label>
+          </div>
+          <p id="scan_cache_info" style="font-size:12px;color:#6b7280;margin:0 0 10px;"></p>
+          <div id="scan_events_list"><div class="empty">Select a window to load events.</div></div>
         </div>
-      </section>
 
-      <!-- Customer Lookup -->
-      <section class="panel" style="margin-top:16px;">
-        <h2>Customer Journey Lookup</h2>
-        <div class="toolbar" style="margin-bottom:12px;">
-          <input id="customer_search" placeholder="customer@example.com" style="max-width:320px;">
-          <button onclick="lookupCustomerClick()">Lookup</button>
+        <!-- ════════════════════════════════════════════
+             SECTION: Candidates
+        ════════════════════════════════════════════ -->
+        <div id="sec-candidates" class="section-view">
+          <div class="page-header">
+            <h2>Candidates</h2>
+            <button style="width:auto;" onclick="showSection('candidates')">Refresh</button>
+          </div>
+          <p style="font-size:12px;color:#6b7280;margin:0 0 12px;">Events where multiple contacts or ambiguous identity was detected. Resolve each to enroll the correct customer.</p>
+          <div id="candidates_list"></div>
         </div>
-        <div id="customer_result"></div>
-      </section>
 
-      <!-- Send Logs -->
-      <section class="panel" style="margin-top:16px;">
-        <h2>Send Logs</h2>
-        <div style="overflow:auto;">
-          <table><thead><tr>
-            <th>Timestamp</th><th>Event</th><th>Recipient</th>
-            <th>Template</th><th>Subject</th><th>Status</th><th>Message</th>
-          </tr></thead>
-          <tbody id="logs_table"></tbody></table>
+        <!-- ════════════════════════════════════════════
+             SECTION: Enrollments (Customer Lookup)
+        ════════════════════════════════════════════ -->
+        <div id="sec-enrollments" class="section-view">
+          <div class="page-header"><h2>Customer Enrollments</h2></div>
+          <div class="panel">
+            <div class="toolbar" style="margin-bottom:12px;">
+              <input id="customer_search" placeholder="customer@example.com" style="max-width:320px;">
+              <button onclick="lookupCustomerClick()">Lookup</button>
+            </div>
+            <div id="customer_result"></div>
+          </div>
         </div>
-      </section>
-    </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Journeys
+        ════════════════════════════════════════════ -->
+        <div id="sec-journeys" class="section-view">
+          <div class="page-header"><h2>Journey Manager</h2></div>
+          <section class="panel">
+            <div class="grid-journey-manager">
+              <div>
+                <div class="toolbar" style="margin-bottom:10px;"><button onclick="newJourney()">+ New Journey</button></div>
+                <div id="journey_list" class="journey-list"></div>
+              </div>
+              <div id="journey_editor"><div class="empty">Select a journey to edit, or create a new one.</div></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Email Templates
+        ════════════════════════════════════════════ -->
+        <div id="sec-templates" class="section-view">
+          <div class="page-header">
+            <h2>Email Templates</h2>
+            <button style="width:auto;" onclick="newTemplate()">New Template</button>
+          </div>
+          <section class="panel">
+            <div style="display:grid;grid-template-columns:270px 1fr 1fr;gap:12px;">
+              <div><div id="template_list" class="template-list"></div></div>
+              <div id="template_editor_body"></div>
+              <div class="preview-shell">
+                <div class="preview-subject">Subject Preview: <span id="preview_subject"></span></div>
+                <div id="preview_html"></div>
+                <hr>
+                <h3 style="margin:8px 0;">Send Test Email</h3>
+                <label>Test Name<input id="test_name" value="Test User"></label>
+                <label>Test Email<input id="test_email" placeholder="test@example.com"></label>
+                <button onclick="sendTest()">Send Test Email</button>
+                <p style="font-size:12px;color:#6b7280;">Placeholders: {{name}}, {{email}}, {{event_title}}, {{event_date}}, {{event_time}}, {{journey_name}}, {{step_number}}, {{total_steps}}, {{enrolled_date}}</p>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: SMS Templates
+        ════════════════════════════════════════════ -->
+        <div id="sec-sms" class="section-view">
+          <div class="page-header">
+            <h2>SMS Templates</h2>
+            <button style="width:auto;" onclick="newSmsTemplate()">New SMS Template</button>
+          </div>
+          <section class="panel">
+            <div style="display:grid;grid-template-columns:260px 1fr;gap:14px;">
+              <div id="sms_template_list" class="sms-template-list"><div class="empty">Loading…</div></div>
+              <div id="sms_template_editor"><div class="empty">Select a template to edit.</div></div>
+            </div>
+          </section>
+        </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Delivery Logs
+        ════════════════════════════════════════════ -->
+        <div id="sec-delivery" class="section-view">
+          <div class="page-header">
+            <h2>Delivery Logs</h2>
+            <button style="width:auto;" onclick="loadDeliveryLogs()">Refresh</button>
+          </div>
+
+          <section class="panel" style="margin-bottom:14px;">
+            <h2 style="font-size:15px;">Email Deliveries</h2>
+            <div style="overflow:auto;">
+              <table><thead><tr>
+                <th>Time</th><th>Recipient</th><th>Subject</th><th>Status</th><th>Message</th>
+              </tr></thead>
+              <tbody id="email_delivery_table"></tbody></table>
+            </div>
+          </section>
+
+          <section class="panel" style="margin-bottom:14px;">
+            <h2 style="font-size:15px;">SMS Deliveries</h2>
+            <div style="overflow:auto;">
+              <table><thead><tr>
+                <th>Time</th><th>Phone</th><th>Twilio SID</th><th>Status</th><th>Reply</th>
+              </tr></thead>
+              <tbody id="sms_delivery_table"></tbody></table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2 style="font-size:15px;">Retry Queue</h2>
+            <div style="overflow:auto;">
+              <table><thead><tr>
+                <th>Channel</th><th>Recipient</th><th>Attempts</th><th>Next Retry</th><th>Status</th><th>Reason</th>
+              </tr></thead>
+              <tbody id="retry_queue_table"></tbody></table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Audit Log
+        ════════════════════════════════════════════ -->
+        <div id="sec-audit" class="section-view">
+          <div class="page-header">
+            <h2>Audit Log</h2>
+            <button style="width:auto;" onclick="filterAuditLog()">Search</button>
+          </div>
+          <section class="panel">
+            <div class="toolbar" style="margin-bottom:12px;flex-wrap:wrap;">
+              <input id="audit_filter_email"   placeholder="Filter by email"      style="max-width:220px;">
+              <input id="audit_filter_journey" placeholder="Filter by journey ID" style="max-width:220px;">
+              <button style="width:auto;" onclick="filterAuditLog()">Filter</button>
+              <button style="width:auto;" onclick="loadAuditLog()">Clear</button>
+            </div>
+            <div style="overflow:auto;">
+              <table><thead><tr>
+                <th>Time</th><th>Actor</th><th>Action</th><th>Customer</th><th>Journey</th><th>Channel</th><th>Details</th>
+              </tr></thead>
+              <tbody id="audit_log_table"></tbody></table>
+            </div>
+          </section>
+        </div>
+
+        <!-- ════════════════════════════════════════════
+             SECTION: Settings
+        ════════════════════════════════════════════ -->
+        <div id="sec-settings" class="section-view">
+          <div class="page-header"><h2>Settings</h2></div>
+          <section class="panel">
+
+            <div class="settings-section-title">Scan &amp; Scheduling</div>
+            <label>Google Calendar ID<input id="calendar_id" placeholder="primary"></label>
+            <div class="grid2">
+              <label>Scan Frequency (days)<input id="scan_frequency_days" type="number" min="1" value="1"></label>
+              <label>Daily Scan Time<input id="daily_scan_time" type="time" value="09:00"></label>
+            </div>
+            <div class="grid2">
+              <label>Look-Ahead (hours)<input id="lookahead_hours" type="number" min="1" value="24"></label>
+              <label style="display:flex;align-items:center;gap:8px;padding-top:20px;">
+                <input id="automation_enabled" type="checkbox" style="width:auto;"> Automation Enabled
+              </label>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="fallback_parse_description" type="checkbox" style="width:auto;"> Parse email from description
+            </label>
+            <label>Sender Name<input id="sender_name" placeholder="Calendar Automation"></label>
+            <label>Reply-To<input id="reply_to" placeholder="reply@example.com"></label>
+
+            <div class="settings-section-title">Twilio / SMS</div>
+            <div class="grid2">
+              <label>Account SID<input id="twilio_account_sid" placeholder="ACxxxx" autocomplete="off"></label>
+              <label>Auth Token<input id="twilio_auth_token" type="password" placeholder="••••" autocomplete="off"></label>
+            </div>
+            <div class="grid2">
+              <label>From Number<input id="twilio_from_number" placeholder="+1XXXXXXXXXX"></label>
+              <label>Messaging Service SID<input id="twilio_messaging_sid" placeholder="MGxxxx (optional)"></label>
+            </div>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="sms_enabled" type="checkbox" style="width:auto;"> SMS Enabled
+            </label>
+
+            <div class="settings-section-title">Identity &amp; Enrollment</div>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="identity_use_attendees" type="checkbox" style="width:auto;"> Extract emails from attendees
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="identity_use_phone" type="checkbox" style="width:auto;"> Extract phone from event text
+            </label>
+            <label>Multi-contact action
+              <select id="multi_contact_action">
+                <option value="candidate">Create candidate for review</option>
+                <option value="first">Enroll first email found</option>
+                <option value="skip">Skip event</option>
+              </select>
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="reenroll_allow_completed" type="checkbox" style="width:auto;"> Allow re-enroll after completed
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="reenroll_allow_cancelled" type="checkbox" style="width:auto;"> Allow re-enroll after cancelled
+            </label>
+
+            <div class="settings-section-title">Scan Cache</div>
+            <label style="display:flex;align-items:center;gap:8px;">
+              <input id="scan_cache_enabled" type="checkbox" style="width:auto;"> Scan cache enabled (55-min TTL, hourly background refresh)
+            </label>
+
+            <div class="settings-section-title">Actions</div>
+            <div class="toolbar">
+              <button onclick="saveSettingsFromForm()">Save Settings</button>
+              <button onclick="createTriggerClick()">Create/Update Triggers</button>
+              <button class="danger" onclick="deleteTriggerClick()">Delete Triggers</button>
+            </div>
+            <p id="trigger_info_settings" style="margin-top:10px;font-size:12px;color:#6b7280;"></p>
+          </section>
+        </div>
+
+      </main><!-- /.main-content -->
+    </div><!-- /.app-shell -->
 
     <div id="toast" class="toast"></div>
     <?!= include('Scripts'); ?>
+
+    <script>
+      // Keep the settings trigger_info_settings panel in sync
+      (function(){
+        const orig = window.renderTriggerInfo;
+        if (typeof orig === 'function') {
+          window.renderTriggerInfo = function() {
+            orig();
+            const src = document.getElementById('trigger_info');
+            const dst = document.getElementById('trigger_info_settings');
+            if (src && dst) dst.textContent = src.textContent;
+          };
+        }
+      })();
+    </script>
   </body>
 </html>

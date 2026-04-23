@@ -108,3 +108,47 @@ function listAuditLogs(p)             { SheetService.ensureInitialized(); return
 // ── Triggers ─────────────────────────────────────────────────
 function createOrUpdateDailyTrigger() { SheetService.ensureInitialized(); return TriggerService.createOrUpdateDailyTrigger(); }
 function deleteDailyTrigger()         { SheetService.ensureInitialized(); return TriggerService.deleteDailyTrigger(); }
+
+// ── Scan Cache Trigger (new) ──────────────────────────────────
+function runScanCacheRefresh() {
+  SheetService.ensureInitialized();
+  var s = SheetService.getSettingsWithDefaults();
+  if (s.automation_enabled !== 'true' || s.scan_cache_enabled !== 'true') return;
+  ScanCacheService.refreshCache(s.calendar_id || 'primary', 'this_month');
+  ScanCacheService.refreshCache(s.calendar_id || 'primary', 'next_month');
+}
+
+// ── SMS Templates ─────────────────────────────────────────────
+function listSmsTemplates()              { SheetService.ensureInitialized(); return SmsTemplateService.listSmsTemplates(); }
+function getSmsTemplateById(id)          { SheetService.ensureInitialized(); return SmsTemplateService.getSmsTemplateById(id); }
+function saveSmsTemplate(p)              { SheetService.ensureInitialized(); return SmsTemplateService.saveSmsTemplate(p||{}); }
+function duplicateSmsTemplate(id)        { SheetService.ensureInitialized(); return SmsTemplateService.duplicateSmsTemplate(id); }
+function deleteSmsTemplate(id)           { SheetService.ensureInitialized(); return SmsTemplateService.deleteSmsTemplate(id); }
+
+// ── Calendar Scan (cached) ────────────────────────────────────
+function getCalendarScan(p)              { SheetService.ensureInitialized(); return ScanCacheService.getOrRefresh((p||{}).calendar_id || SheetService.getSettingsWithDefaults().calendar_id, (p||{}).window_type, (p||{}).custom_start, (p||{}).custom_end); }
+function refreshCalendarScan(p)          { SheetService.ensureInitialized(); return ScanCacheService.refreshCache((p||{}).calendar_id || SheetService.getSettingsWithDefaults().calendar_id, (p||{}).window_type, (p||{}).custom_start, (p||{}).custom_end); }
+
+// ── Candidates ────────────────────────────────────────────────
+function listCandidates(status)          { SheetService.ensureInitialized(); return CandidateService.listCandidates(status||'pending'); }
+function resolveCandidate(p)             { SheetService.ensureInitialized(); return CandidateService.resolve((p||{}).candidate_id, p||{}); }
+function ignoreCandidate(id)             { SheetService.ensureInitialized(); return CandidateService.ignoreCandidate(id,'admin'); }
+function saveMatchPattern(p)             { SheetService.ensureInitialized(); return CandidateService.saveMatchPattern(p||{}); }
+
+// ── Delivery Logs ─────────────────────────────────────────────
+function listSmsLogs(limit)              { SheetService.ensureInitialized(); return SheetService.listSmsLogs(limit||200); }
+function listDeliveryQueue(status)       { SheetService.ensureInitialized(); return SheetService.listDeliveryQueue(status||''); }
+
+// ── Journey version history ───────────────────────────────────
+function listJourneyVersions(id)         { SheetService.ensureInitialized(); return JourneyService.listJourneyVersions(id); }
+
+// ── Active enrollment editing ─────────────────────────────────
+function skipEnrollmentStep(p)           { SheetService.ensureInitialized(); return JourneyService.skipStep((p||{}).state_id,'admin'); }
+function moveEnrollmentNextSend(p)       { SheetService.ensureInitialized(); return JourneyService.moveNextSendAt((p||{}).state_id,(p||{}).next_send_at,'admin'); }
+function updateEnrollmentContact(p)      { SheetService.ensureInitialized(); return JourneyService.updateEnrollmentContact((p||{}).state_id, p||{}, 'admin'); }
+
+// ── EnrollmentGuard-aware enroll (new manual enroll) ──────────
+function enrollCustomerGuarded(p)        { SheetService.ensureInitialized(); return EnrollmentGuard.enroll(p||{}); }
+
+// ── Audit Log (extended) ──────────────────────────────────────
+function listAuditLogsFull(p)            { SheetService.ensureInitialized(); return SheetService.listAuditLogs(p||{}); }
