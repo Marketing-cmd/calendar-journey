@@ -12,16 +12,6 @@ var JourneyScheduler = (function () {
 
   function safeJson(str) { try{ return JSON.parse(str||'{}'); }catch(e){ return {}; } }
 
-  function processQueue() {
-    var due = SheetService.getPendingDueStates();
-    var results = { processed:0, sent:0, skipped:0, completed:0, errors:[] };
-    due.forEach(function(state){
-      try { processState(state, results); }
-      catch(err){ results.errors.push({ state_id:state.state_id, error:err.message }); }
-    });
-    return results;
-  }
-
   function processState(state, results) {
     results.processed++;
     var journey = SheetService.getJourneyById(state.current_journey_id);
@@ -60,9 +50,9 @@ var JourneyScheduler = (function () {
       return;
     }
 
-    // Resend guard
+    // Resend guard — extended to check SMS log and delivery queue too
     var uniqueKey = state.state_id+'|'+nextIdx;
-    if (SheetService.wasAlreadySent(uniqueKey)) { results.skipped++; return; }
+    if (SheetService.wasAlreadySentOrQueued(uniqueKey)) { results.skipped++; return; }
 
     var eventData    = safeJson(state.event_data_json);
     var placeholders = Object.assign({}, eventData, {
@@ -74,28 +64,61 @@ var JourneyScheduler = (function () {
       enrolled_date: state.enrolled_at ? state.enrolled_at.split('T')[0] : ''
     });
 
-    var tplForSend = step.subject_override
+    var channel    = String(step.channel || 'email');
+    var tplForSend = (template && step.subject_override)
       ? Object.assign({}, template, { subject: step.subject_override })
       : template;
 
-    var sendResult = EmailService.sendTemplatedEmail({ to:state.customer_email, template:tplForSend, placeholders });
-    var now = SheetService.nowIso();
-
-    SheetService.addSendLog({
-      timestamp:   now,
-      event_id:    state.calendar_event_id,
-      event_title: eventData.event_title||'',
-      event_start: eventData.event_start||'',
-      event_color: '',
-      recipient:   state.customer_email,
+    // Create delivery record before sending (enables retry tracking)
+    var delivery = DeliveryService.createDelivery({
+      state_id:    state.state_id,
+      step_index:  nextIdx,
+      channel:     channel,
+      recipient:   channel === 'sms' ? (state.phone || '') : state.customer_email,
       template_id: templateId,
-      subject:     sendResult.subject,
-      status:      sendResult.ok ? 'SENT' : 'ERROR',
-      message:     sendResult.message,
       unique_key:  uniqueKey
     });
 
+    // Route through ChannelRouter instead of calling EmailService directly
+    var sendResult = ChannelRouter.send({
+      channel:       channel,
+      to:            state.customer_email,
+      phone:         state.phone || '',
+      template:      tplForSend,
+      smsTemplateId: step.sms_template_id || '',
+      placeholders:  placeholders,
+      stateId:       state.state_id,
+      stepIndex:     nextIdx,
+      journeyId:     state.current_journey_id,
+      uniqueKey:     uniqueKey
+    });
+
+    var now        = SheetService.nowIso();
+    var subject    = sendResult.emailResult ? sendResult.emailResult.subject : '';
+    var logMessage = sendResult.message || '';
+
+    // Always write a send log for email channel (backward compat with existing log table)
+    if (channel === 'email' || channel === 'both') {
+      SheetService.addSendLog({
+        timestamp:      now,
+        event_id:       state.calendar_event_id,
+        event_title:    eventData.event_title||'',
+        event_start:    eventData.event_start||'',
+        event_color:    '',
+        recipient:      state.customer_email,
+        template_id:    templateId,
+        subject:        subject,
+        status:         sendResult.ok ? 'SENT' : 'ERROR',
+        message:        logMessage,
+        unique_key:     uniqueKey,
+        delivery_id:    delivery.delivery_id,
+        attempt_number: '1',
+        channel:        channel
+      });
+    }
+
     if (sendResult.ok) {
+      DeliveryService.markSent(delivery.delivery_id);
       state.last_email_sent_step = String(nextIdx);
       state.last_email_sent_at   = now;
       state.current_status       = 'active';
@@ -103,20 +126,44 @@ var JourneyScheduler = (function () {
       var afterIdx = nextIdx+1;
       state.next_send_at = afterIdx < steps.length ? computeNextSendAt(steps[afterIdx]) : now;
       SheetService.upsertJourneyState(state);
-      SheetService.addAuditLog({ action:'step_sent', actor:'system',
-        customer_email:state.customer_email,
-        journey_id:state.current_journey_id, journey_name:journey.journey_name,
-        state_id:state.state_id, step_index:nextIdx,
-        details:'Step '+(nextIdx+1)+'/'+steps.length+' sent. Subject: '+sendResult.subject });
+      AuditService.logStepSent({
+        customer_email: state.customer_email,
+        journey_id:     state.current_journey_id,
+        journey_name:   journey.journey_name,
+        state_id:       state.state_id,
+        step_index:     nextIdx,
+        channel:        channel,
+        delivery_id:    delivery.delivery_id,
+        details:        'Step '+(nextIdx+1)+'/'+steps.length+' sent via '+channel+'. Subject: '+subject
+      });
       results.sent++;
     } else {
-      SheetService.addAuditLog({ action:'step_error', actor:'system',
-        customer_email:state.customer_email,
-        journey_id:state.current_journey_id, journey_name:journey.journey_name,
-        state_id:state.state_id, step_index:nextIdx,
-        details:'Send failed: '+sendResult.message });
+      DeliveryService.markFailed(delivery.delivery_id, logMessage);
+      AuditService.logStepError({
+        customer_email: state.customer_email,
+        journey_id:     state.current_journey_id,
+        journey_name:   journey.journey_name,
+        state_id:       state.state_id,
+        step_index:     nextIdx,
+        channel:        channel,
+        delivery_id:    delivery.delivery_id,
+        details:        'Send failed: '+logMessage
+      });
       results.skipped++;
     }
+  }
+
+  function processQueue() {
+    var due = SheetService.getPendingDueStates();
+    var results = { processed:0, sent:0, skipped:0, completed:0, errors:[] };
+    due.forEach(function(state){
+      try { processState(state, results); }
+      catch(err){ results.errors.push({ state_id:state.state_id, error:err.message }); }
+    });
+    // Process retries for previously failed deliveries
+    var retryResults = DeliveryService.processRetries();
+    results.retried  = retryResults.retried || 0;
+    return results;
   }
 
   return { processQueue };

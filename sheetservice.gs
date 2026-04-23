@@ -2,13 +2,21 @@ var SheetService = (function () {
   var SPREADSHEET_ID_PROP = 'DATA_SPREADSHEET_ID';
 
   var SHEETS = {
-    TEMPLATES:     'Templates',
-    COLOR_RULES:   'ColorRules',
-    SEND_LOG:      'SendLog',
-    SETTINGS:      'Settings',
-    JOURNEYS:      'Journeys',
-    JOURNEY_STATE: 'JourneyState',
-    AUDIT_LOG:     'AuditLog'
+    TEMPLATES:        'Templates',
+    COLOR_RULES:      'ColorRules',
+    SEND_LOG:         'SendLog',
+    SETTINGS:         'Settings',
+    JOURNEYS:         'Journeys',
+    JOURNEY_STATE:    'JourneyState',
+    AUDIT_LOG:        'AuditLog',
+    // ── New tabs (appended safely — existing tabs above unchanged) ──
+    SMS_TEMPLATES:    'SmsTemplates',
+    SMS_LOG:          'SmsLog',
+    CANDIDATES:       'Candidates',
+    MATCH_PATTERNS:   'MatchPatterns',
+    DELIVERY_QUEUE:   'DeliveryQueue',
+    SCAN_CACHE:       'ScanCache',
+    JOURNEY_VERSIONS: 'JourneyVersions'
   };
 
   var COLUMNS = {
@@ -40,8 +48,54 @@ var SheetService = (function () {
     ],
     AUDIT_LOG: [
       'log_id','timestamp','actor','action','customer_email',
-      'journey_id','journey_name','step_index','state_id','details'
-    ]
+      'journey_id','journey_name','step_index','state_id','details',
+      // New columns appended — old rows return '' safely
+      'channel','delivery_id','reason'
+    ],
+
+    // ── New tab column definitions ────────────────────────────────
+    SMS_TEMPLATES: [
+      'sms_template_id','template_name','body',
+      'active','created_at','updated_at'
+    ],
+    SMS_LOG: [
+      'sms_log_id','timestamp','twilio_sid','enrollment_id','state_id',
+      'phone','journey_id','step_index','sent_at',
+      'delivery_status','reply_status','reply_text','reply_timestamp',
+      'action_flag','unique_key'
+    ],
+    CANDIDATES: [
+      'candidate_id','calendar_event_id','event_title','event_start',
+      'event_color','raw_title','raw_description','extracted_emails',
+      'extracted_phones','attendee_emails','status',
+      'resolved_email','resolved_phone','resolved_name',
+      'resolved_by','resolved_at','pattern_id','created_at','updated_at'
+    ],
+    MATCH_PATTERNS: [
+      'pattern_id','pattern_type','match_value','resolved_email',
+      'resolved_phone','resolved_name','created_by','created_at','use_count'
+    ],
+    DELIVERY_QUEUE: [
+      'delivery_id','state_id','step_index','channel','recipient',
+      'template_id','unique_key','attempt_count','last_attempt_at',
+      'next_retry_at','status','fail_reason','created_at','updated_at'
+    ],
+    SCAN_CACHE: [
+      'cache_id','calendar_id','window_start','window_end',
+      'scanned_at','event_count','result_json'
+    ],
+    JOURNEY_VERSIONS: [
+      'version_id','journey_id','version','steps_json',
+      'saved_by','saved_at','notes'
+    ],
+
+    // ── Extended columns on existing tabs (appended — old rows return '' safely) ──
+    JOURNEYS_EXT: ['version','parent_journey_id'],
+    JOURNEY_STATE_EXT: [
+      'journey_version','channel','phone','source',
+      'staff_owner','notes','conflict_flag'
+    ],
+    SEND_LOG_EXT: ['delivery_id','attempt_number','channel']
   };
 
   var DEFAULT_SETTINGS = {};
@@ -53,6 +107,18 @@ var SheetService = (function () {
   DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.FALLBACK_PARSE_DESCRIPTION]= 'true';
   DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.SENDER_NAME]               = 'Calendar Automation';
   DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.REPLY_TO]                  = Session.getActiveUser().getEmail() || '';
+  // ── New settings (appended — old installs get empty defaults safely) ──
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.TWILIO_ACCOUNT_SID]        = '';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.TWILIO_AUTH_TOKEN]         = '';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.TWILIO_FROM_NUMBER]        = '';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.TWILIO_MESSAGING_SID]      = '';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.SMS_ENABLED]               = 'false';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.SCAN_CACHE_ENABLED]        = 'true';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.IDENTITY_USE_ATTENDEES]    = 'true';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.IDENTITY_USE_PHONE]        = 'true';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.MULTI_CONTACT_ACTION]      = 'candidate'; // candidate | skip
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.REENROLL_ALLOW_COMPLETED]  = 'true';
+  DEFAULT_SETTINGS[APP_CONFIG.SETTINGS_KEYS.REENROLL_ALLOW_CANCELLED]  = 'true';
 
   function nowIso() { return new Date().toISOString(); }
 
@@ -79,7 +145,21 @@ var SheetService = (function () {
     if (mismatch) sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
   }
 
+  // Safely appends new columns to an existing sheet without touching existing data.
+  // Only writes headers for columns that don't exist yet (by checking the header row width).
+  function ensureExtraColumns(sheet, allHeaders) {
+    var lastCol = sheet.getLastColumn();
+    var existingHeaders = lastCol > 0
+      ? sheet.getRange(1, 1, 1, lastCol).getValues()[0]
+      : [];
+    var toAdd = allHeaders.filter(function(h){ return existingHeaders.indexOf(h) < 0; });
+    if (!toAdd.length) return;
+    var startCol = lastCol + 1;
+    sheet.getRange(1, startCol, 1, toAdd.length).setValues([toAdd]);
+  }
+
   function ensureInitialized() {
+    // ── Existing tabs (unchanged) ──
     ensureHeader(getSheet(SHEETS.TEMPLATES),     COLUMNS.TEMPLATES);
     ensureHeader(getSheet(SHEETS.COLOR_RULES),   COLUMNS.COLOR_RULES);
     ensureHeader(getSheet(SHEETS.SEND_LOG),      COLUMNS.SEND_LOG);
@@ -87,6 +167,21 @@ var SheetService = (function () {
     ensureHeader(getSheet(SHEETS.JOURNEYS),      COLUMNS.JOURNEYS);
     ensureHeader(getSheet(SHEETS.JOURNEY_STATE), COLUMNS.JOURNEY_STATE);
     ensureHeader(getSheet(SHEETS.AUDIT_LOG),     COLUMNS.AUDIT_LOG);
+
+    // ── Append new columns to existing tabs (safe — existing data untouched) ──
+    ensureExtraColumns(getSheet(SHEETS.JOURNEYS),      COLUMNS.JOURNEYS_EXT);
+    ensureExtraColumns(getSheet(SHEETS.JOURNEY_STATE), COLUMNS.JOURNEY_STATE_EXT);
+    ensureExtraColumns(getSheet(SHEETS.SEND_LOG),      COLUMNS.SEND_LOG_EXT);
+    ensureExtraColumns(getSheet(SHEETS.AUDIT_LOG),     ['channel','delivery_id','reason']);
+
+    // ── New tabs ──
+    ensureHeader(getSheet(SHEETS.SMS_TEMPLATES),    COLUMNS.SMS_TEMPLATES);
+    ensureHeader(getSheet(SHEETS.SMS_LOG),          COLUMNS.SMS_LOG);
+    ensureHeader(getSheet(SHEETS.CANDIDATES),       COLUMNS.CANDIDATES);
+    ensureHeader(getSheet(SHEETS.MATCH_PATTERNS),   COLUMNS.MATCH_PATTERNS);
+    ensureHeader(getSheet(SHEETS.DELIVERY_QUEUE),   COLUMNS.DELIVERY_QUEUE);
+    ensureHeader(getSheet(SHEETS.SCAN_CACHE),       COLUMNS.SCAN_CACHE);
+    ensureHeader(getSheet(SHEETS.JOURNEY_VERSIONS), COLUMNS.JOURNEY_VERSIONS);
 
     var tpl = getSheet(SHEETS.TEMPLATES);
     if (tpl.getLastRow() < 2) {
@@ -254,6 +349,107 @@ var SheetService = (function () {
     return rows.slice(0, Math.max(1, Number(p.limit)||200));
   }
 
+  // ── SMS Templates ─────────────────────────────────────────────
+  function listSmsTemplates() {
+    var rows = getSheetData(SHEETS.SMS_TEMPLATES, COLUMNS.SMS_TEMPLATES);
+    rows.sort(function(a,b){ return new Date(b.updated_at)-new Date(a.updated_at); });
+    return rows;
+  }
+  function getSmsTemplateById(id) {
+    var s = String(id||'').trim();
+    return s ? (listSmsTemplates().find(function(t){ return String(t.sms_template_id)===s; })||null) : null;
+  }
+  function upsertSmsTemplate(t) { return upsertByKey(SHEETS.SMS_TEMPLATES, COLUMNS.SMS_TEMPLATES, 'sms_template_id', t); }
+  function deleteSmsTemplateRow(id) { return deleteByKey(SHEETS.SMS_TEMPLATES, COLUMNS.SMS_TEMPLATES, 'sms_template_id', id); }
+
+  // ── SMS Log ───────────────────────────────────────────────────
+  function addSmsLog(log) { appendRow(SHEETS.SMS_LOG, COLUMNS.SMS_LOG, log); }
+  function listSmsLogs(limit) {
+    var rows = getSheetData(SHEETS.SMS_LOG, COLUMNS.SMS_LOG);
+    rows.sort(function(a,b){ return new Date(b.timestamp)-new Date(a.timestamp); });
+    return rows.slice(0, Math.max(1, Number(limit)||200));
+  }
+  function updateSmsLogDelivery(smsLogId, updates) {
+    var sheet = getSheet(SHEETS.SMS_LOG);
+    var rows  = getSheetData(SHEETS.SMS_LOG, COLUMNS.SMS_LOG);
+    var idx   = rows.findIndex(function(r){ return String(r.sms_log_id)===String(smsLogId); });
+    if (idx < 0) return false;
+    var row = Object.assign({}, rows[idx], updates);
+    sheet.getRange(idx+2, 1, 1, COLUMNS.SMS_LOG.length)
+      .setValues([COLUMNS.SMS_LOG.map(function(h){ return row[h]!==undefined?row[h]:''; })]);
+    return true;
+  }
+
+  // ── Candidates ────────────────────────────────────────────────
+  function listCandidates(statusFilter) {
+    var rows = getSheetData(SHEETS.CANDIDATES, COLUMNS.CANDIDATES);
+    rows.sort(function(a,b){ return new Date(b.created_at)-new Date(a.created_at); });
+    if (statusFilter) rows = rows.filter(function(r){ return String(r.status)===String(statusFilter); });
+    return rows;
+  }
+  function getCandidateById(id) {
+    var s = String(id||'').trim();
+    return s ? (getSheetData(SHEETS.CANDIDATES, COLUMNS.CANDIDATES).find(function(r){ return String(r.candidate_id)===s; })||null) : null;
+  }
+  function upsertCandidate(c) { return upsertByKey(SHEETS.CANDIDATES, COLUMNS.CANDIDATES, 'candidate_id', c); }
+
+  // ── Match Patterns ────────────────────────────────────────────
+  function listMatchPatterns() { return getSheetData(SHEETS.MATCH_PATTERNS, COLUMNS.MATCH_PATTERNS); }
+  function upsertMatchPattern(p) { return upsertByKey(SHEETS.MATCH_PATTERNS, COLUMNS.MATCH_PATTERNS, 'pattern_id', p); }
+  function findMatchPattern(type, value) {
+    var t = String(type||'').trim(), v = String(value||'').toLowerCase().trim();
+    return listMatchPatterns().find(function(p){ return String(p.pattern_type)===t && String(p.match_value).toLowerCase()===v; })||null;
+  }
+
+  // ── Delivery Queue ────────────────────────────────────────────
+  function listDeliveryQueue(statusFilter) {
+    var rows = getSheetData(SHEETS.DELIVERY_QUEUE, COLUMNS.DELIVERY_QUEUE);
+    if (statusFilter) rows = rows.filter(function(r){ return String(r.status)===String(statusFilter); });
+    return rows;
+  }
+  function getDeliveryById(id) {
+    var s = String(id||'').trim();
+    return s ? (getSheetData(SHEETS.DELIVERY_QUEUE, COLUMNS.DELIVERY_QUEUE).find(function(r){ return String(r.delivery_id)===s; })||null) : null;
+  }
+  function upsertDelivery(d) { return upsertByKey(SHEETS.DELIVERY_QUEUE, COLUMNS.DELIVERY_QUEUE, 'delivery_id', d); }
+  function getPendingRetries() {
+    var now = new Date();
+    return listDeliveryQueue('pending_retry').filter(function(d){
+      return d.next_retry_at && new Date(d.next_retry_at) <= now;
+    });
+  }
+
+  // ── Scan Cache ────────────────────────────────────────────────
+  function getScanCache(calendarId, windowStart, windowEnd) {
+    return getSheetData(SHEETS.SCAN_CACHE, COLUMNS.SCAN_CACHE).find(function(r){
+      return String(r.calendar_id)===String(calendarId) &&
+             String(r.window_start)===String(windowStart) &&
+             String(r.window_end)===String(windowEnd);
+    })||null;
+  }
+  function upsertScanCache(c) { return upsertByKey(SHEETS.SCAN_CACHE, COLUMNS.SCAN_CACHE, 'cache_id', c); }
+
+  // ── Journey Versions ──────────────────────────────────────────
+  function addJourneyVersion(v) { appendRow(SHEETS.JOURNEY_VERSIONS, COLUMNS.JOURNEY_VERSIONS, v); }
+  function listJourneyVersions(journeyId) {
+    var rows = getSheetData(SHEETS.JOURNEY_VERSIONS, COLUMNS.JOURNEY_VERSIONS);
+    var id = String(journeyId||'').trim();
+    if (id) rows = rows.filter(function(r){ return String(r.journey_id)===id; });
+    rows.sort(function(a,b){ return Number(b.version)-Number(a.version); });
+    return rows;
+  }
+
+  // ── Extended wasAlreadySent (checks DeliveryQueue too) ────────
+  function wasAlreadySentOrQueued(uniqueKey) {
+    if (!uniqueKey) return false;
+    if (getSheetData(SHEETS.SEND_LOG, COLUMNS.SEND_LOG).some(function(r){
+      return String(r.unique_key)===String(uniqueKey) && String(r.status).toUpperCase()==='SENT';
+    })) return true;
+    return getSheetData(SHEETS.SMS_LOG, COLUMNS.SMS_LOG).some(function(r){
+      return String(r.unique_key)===String(uniqueKey);
+    });
+  }
+
   return {
     SHEETS, COLUMNS,
     ensureInitialized,
@@ -264,6 +460,15 @@ var SheetService = (function () {
     listJourneys, getJourneyById, upsertJourney, deleteJourneyRow,
     listJourneyStates, getJourneyStateById, getActiveStatesForEvent,
     getActiveStatesForCustomer, getAllStatesForCustomer, getPendingDueStates, upsertJourneyState,
-    addAuditLog, listAuditLogs
+    addAuditLog, listAuditLogs,
+    // ── New exports ──
+    listSmsTemplates, getSmsTemplateById, upsertSmsTemplate, deleteSmsTemplateRow,
+    addSmsLog, listSmsLogs, updateSmsLogDelivery,
+    listCandidates, getCandidateById, upsertCandidate,
+    listMatchPatterns, upsertMatchPattern, findMatchPattern,
+    listDeliveryQueue, getDeliveryById, upsertDelivery, getPendingRetries,
+    getScanCache, upsertScanCache,
+    addJourneyVersion, listJourneyVersions,
+    wasAlreadySentOrQueued
   };
 })();

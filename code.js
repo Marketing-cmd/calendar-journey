@@ -1,5 +1,6 @@
 var APP_CONFIG = {
   SETTINGS_KEYS: {
+    // ── Existing keys (never rename) ──
     CALENDAR_ID:               'calendar_id',
     SCAN_FREQUENCY_DAYS:       'scan_frequency_days',
     DAILY_SCAN_TIME:           'daily_scan_time',
@@ -7,7 +8,19 @@ var APP_CONFIG = {
     AUTOMATION_ENABLED:        'automation_enabled',
     FALLBACK_PARSE_DESCRIPTION:'fallback_parse_description',
     SENDER_NAME:               'sender_name',
-    REPLY_TO:                  'reply_to'
+    REPLY_TO:                  'reply_to',
+    // ── New keys (appended) ──
+    TWILIO_ACCOUNT_SID:        'twilio_account_sid',
+    TWILIO_AUTH_TOKEN:         'twilio_auth_token',
+    TWILIO_FROM_NUMBER:        'twilio_from_number',
+    TWILIO_MESSAGING_SID:      'twilio_messaging_sid',
+    SMS_ENABLED:               'sms_enabled',
+    SCAN_CACHE_ENABLED:        'scan_cache_enabled',
+    IDENTITY_USE_ATTENDEES:    'identity_use_attendees',
+    IDENTITY_USE_PHONE:        'identity_use_phone',
+    MULTI_CONTACT_ACTION:      'multi_contact_action',
+    REENROLL_ALLOW_COMPLETED:  'reenroll_allow_completed',
+    REENROLL_ALLOW_CANCELLED:  'reenroll_allow_cancelled'
   }
 };
 
