@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <base target="_top">
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <?!= include('Styles'); ?>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="hero">
+        <h1><?= appName ?></h1>
+        <p>Calendar color → customer journey enrollment, scheduling, and admin controls.</p>
+      </div>
+
+      <!-- Settings + Template Management -->
+      <div class="grid-main">
+        <section class="panel">
+          <h2>Scan Settings</h2>
+          <label>Google Calendar ID<input id="calendar_id" placeholder="primary"></label>
+          <div class="grid2">
+            <label>Scan Frequency (days)<input id="scan_frequency_days" type="number" min="1" value="1"></label>
+            <label>Daily Scan Time<input id="daily_scan_time" type="time" value="09:00"></label>
+          </div>
+          <div class="grid2">
+            <label>Look-Ahead (hours)<input id="lookahead_hours" type="number" min="1" value="24"></label>
+            <label>Automation Enabled<input id="automation_enabled" type="checkbox" style="width:auto;"></label>
+          </div>
+          <label><input id="fallback_parse_description" type="checkbox" style="width:auto;"> Parse email from description</label>
+          <label>Sender Name<input id="sender_name" placeholder="Calendar Automation"></label>
+          <label>Reply-To<input id="reply_to" placeholder="reply@example.com"></label>
+          <div class="toolbar">
+            <button onclick="saveSettingsFromForm()">Save Settings</button>
+            <button onclick="runScanNowClick()">Legacy Scan Now</button>
+            <button onclick="runJourneyScanNowClick()">Journey Scan Now</button>
+          </div>
+          <div class="toolbar" style="margin-top:10px;">
+            <button onclick="createTriggerClick()">Create/Update Triggers</button>
+            <button class="danger" onclick="deleteTriggerClick()">Delete Triggers</button>
+          </div>
+          <p id="trigger_info" style="margin-top:10px;font-size:12px;color:#6b7280;"></p>
+        </section>
+
+        <section class="panel">
+          <h2>Template Management</h2>
+          <div class="toolbar" style="margin-bottom:10px;"><button onclick="newTemplate()">New Template</button></div>
+          <div style="display:grid;grid-template-columns:270px 1fr 1fr;gap:12px;">
+            <div><div id="template_list" class="template-list"></div></div>
+            <div id="template_editor_body"></div>
+            <div class="preview-shell">
+              <div class="preview-subject">Subject Preview: <span id="preview_subject"></span></div>
+              <div id="preview_html"></div>
+              <hr>
+              <h3 style="margin:8px 0;">Send Test Email</h3>
+              <label>Test Name<input id="test_name" value="Test User"></label>
+              <label>Test Email<input id="test_email" placeholder="test@example.com"></label>
+              <button onclick="sendTest()">Send Test Email</button>
+              <p style="font-size:12px;color:#6b7280;">Placeholders: {{name}}, {{email}}, {{event_title}}, {{event_date}}, {{event_time}}, {{journey_name}}, {{step_number}}, {{total_steps}}, {{enrolled_date}}</p>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- Color Mapping -->
+      <section class="panel" style="margin-top:16px;">
+        <h2>Color Mapping</h2>
+        <p style="font-size:12px;color:#6b7280;margin:0 0 10px;">Set a <strong>Journey</strong> to enroll customers on color change. Set a <strong>Template</strong> (legacy) to send a one-off email. Journey takes priority.</p>
+        <div id="color_cards" class="color-grid"></div>
+      </section>
+
+      <!-- Journey Manager -->
+      <section class="panel" style="margin-top:16px;">
+        <h2>Journey Manager</h2>
+        <div class="grid-journey-manager">
+          <div>
+            <div class="toolbar" style="margin-bottom:10px;"><button onclick="newJourney()">+ New Journey</button></div>
+            <div id="journey_list" class="journey-list"></div>
+          </div>
+          <div id="journey_editor"><div class="empty">Select a journey to edit, or create a new one.</div></div>
+        </div>
+      </section>
+
+      <!-- Customer Lookup -->
+      <section class="panel" style="margin-top:16px;">
+        <h2>Customer Journey Lookup</h2>
+        <div class="toolbar" style="margin-bottom:12px;">
+          <input id="customer_search" placeholder="customer@example.com" style="max-width:320px;">
+          <button onclick="lookupCustomerClick()">Lookup</button>
+        </div>
+        <div id="customer_result"></div>
+      </section>
+
+      <!-- Send Logs -->
+      <section class="panel" style="margin-top:16px;">
+        <h2>Send Logs</h2>
+        <div style="overflow:auto;">
+          <table><thead><tr>
+            <th>Timestamp</th><th>Event</th><th>Recipient</th>
+            <th>Template</th><th>Subject</th><th>Status</th><th>Message</th>
+          </tr></thead>
+          <tbody id="logs_table"></tbody></table>
+        </div>
+      </section>
+    </div>
+
+    <div id="toast" class="toast"></div>
+    <?!= include('Scripts'); ?>
+  </body>
+</html>

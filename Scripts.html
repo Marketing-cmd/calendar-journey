@@ -1,0 +1,555 @@
+<script>
+const state = {
+  templates:[], colorRules:[], eventColors:[], logs:[], settings:{}, triggerInfo:{},
+  selectedTemplateId: null,
+  journeys:[], selectedJourneyId:null, journeySteps:[]
+};
+
+function runServer(fn, args) {
+  return new Promise((resolve,reject) => {
+    google.script.run.withSuccessHandler(resolve).withFailureHandler(e=>reject(new Error(e.message||e)))[fn](args);
+  });
+}
+
+function escapeHtml(s) {
+  return String(s||'').replace(/[&<>"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function selectedTemplate() { return state.templates.find(t=>String(t.template_id)===String(state.selectedTemplateId))||null; }
+function selectedJourney()  { return state.journeys.find(j=>String(j.journey_id)===String(state.selectedJourneyId))||null; }
+
+function badgeHtml(status) {
+  return `<span class="badge badge-${escapeHtml(status)}">${escapeHtml(status)}</span>`;
+}
+
+function toast(msg, isErr=false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.className='toast '+(isErr?'err':'ok')+' show';
+  setTimeout(()=>el.classList.remove('show'), 2800);
+}
+
+// ── Load ─────────────────────────────────────────────────────
+async function loadDashboard() {
+  try {
+    const data = await runServer('getDashboardData');
+    state.settings       = data.settings||{};
+    state.templates      = data.templates||[];
+    state.colorRules     = data.colorRules||[];
+    state.eventColors    = data.eventColors||[];
+    state.logs           = data.logs||[];
+    state.triggerInfo    = data.triggerInfo||{};
+    state.journeys       = data.journeys||[];
+    state.selectedTemplateId = state.selectedTemplateId||(state.templates[0]&&state.templates[0].template_id);
+    state.selectedJourneyId  = state.selectedJourneyId||(state.journeys[0]&&state.journeys[0].journey_id);
+    state.journeySteps       = getSelectedJourneySteps();
+    renderAll();
+  } catch(e){ toast(e.message,true); }
+}
+
+function renderAll() {
+  renderSettings(); renderTemplateList(); renderTemplateEditor();
+  renderColorMapping(); renderLogs(); renderTriggerInfo();
+  renderJourneyList(); renderJourneyEditor();
+}
+
+// ── Settings ─────────────────────────────────────────────────
+function renderSettings() {
+  const s = state.settings;
+  document.getElementById('calendar_id').value          = s.calendar_id||'primary';
+  document.getElementById('scan_frequency_days').value  = s.scan_frequency_days||'1';
+  document.getElementById('daily_scan_time').value      = s.daily_scan_time||'09:00';
+  document.getElementById('lookahead_hours').value      = s.lookahead_hours||'24';
+  document.getElementById('automation_enabled').checked = String(s.automation_enabled)==='true';
+  document.getElementById('fallback_parse_description').checked = String(s.fallback_parse_description)!=='false';
+  document.getElementById('sender_name').value          = s.sender_name||'';
+  document.getElementById('reply_to').value             = s.reply_to||'';
+}
+
+function renderTriggerInfo() {
+  const t = state.triggerInfo||{};
+  const leg = t.legacy||{}, jny = t.journey||{};
+  document.getElementById('trigger_info').textContent =
+    `Legacy trigger: ${leg.active?'ON':'OFF'} | Journey trigger: ${jny.active?'ON (hourly)':'OFF'} | Configured: ${t.configuredTime||'09:00'}`;
+}
+
+async function saveSettingsFromForm() {
+  try {
+    const res = await runServer('saveSettings',{
+      calendar_id:                   document.getElementById('calendar_id').value.trim(),
+      scan_frequency_days:           document.getElementById('scan_frequency_days').value,
+      daily_scan_time:               document.getElementById('daily_scan_time').value,
+      lookahead_hours:               document.getElementById('lookahead_hours').value,
+      automation_enabled:            String(document.getElementById('automation_enabled').checked),
+      fallback_parse_description:    String(document.getElementById('fallback_parse_description').checked),
+      sender_name:                   document.getElementById('sender_name').value,
+      reply_to:                      document.getElementById('reply_to').value
+    });
+    state.settings=res.settings; state.triggerInfo=res.triggerInfo;
+    renderSettings(); renderTriggerInfo(); toast('Settings saved');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function runScanNowClick() {
+  try {
+    const r = await runServer('runScanNow');
+    toast(`Legacy scan: scanned ${r.scanned}, sent ${r.sent}, skipped ${r.skipped}`);
+    state.logs = await runServer('listSendLogs',200); renderLogs();
+  } catch(e){ toast(e.message,true); }
+}
+
+async function runJourneyScanNowClick() {
+  try {
+    const r = await runServer('runJourneyScanNow');
+    toast(`Journey scan: enrolled ${r.scan.enrolled}, switched ${r.scan.switched}, cancelled ${r.scan.cancelled} | Queue: sent ${r.queue.sent}`);
+    state.logs = await runServer('listSendLogs',200); renderLogs();
+  } catch(e){ toast(e.message,true); }
+}
+
+async function createTriggerClick() {
+  try {
+    await saveSettingsFromForm();
+    toast('Triggers updated'); renderTriggerInfo();
+  } catch(e){ toast(e.message,true); }
+}
+
+async function deleteTriggerClick() {
+  try {
+    await runServer('deleteDailyTrigger');
+    toast('Triggers deleted');
+    const data = await runServer('getDashboardData');
+    state.triggerInfo=data.triggerInfo; renderTriggerInfo();
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── Templates ─────────────────────────────────────────────────
+function renderTemplateList() {
+  const host = document.getElementById('template_list');
+  if (!state.templates.length){ host.innerHTML='<div class="empty">No templates.</div>'; return; }
+  host.innerHTML = state.templates.map(t=>`
+    <button class="template-item ${String(t.template_id)===String(state.selectedTemplateId)?'sel':''}" onclick="pickTemplate('${t.template_id}')">
+      <div class="template-title">${escapeHtml(t.template_name)}</div>
+      <div class="template-meta">${String(t.active)==='true'?'Active':'Inactive'}</div>
+    </button>`).join('');
+}
+
+function renderTemplateEditor() {
+  const t=selectedTemplate(), body=document.getElementById('template_editor_body');
+  if (!t){ body.innerHTML='<div class="empty">Select a template to edit.</div>'; return; }
+  body.innerHTML=`
+    <div class="grid2">
+      <label>Name<input id="t_name" value="${escapeHtml(t.template_name)}"></label>
+      <label>Active<select id="t_active">
+        <option value="true" ${String(t.active)==='true'?'selected':''}>true</option>
+        <option value="false" ${String(t.active)==='false'?'selected':''}>false</option>
+      </select></label>
+    </div>
+    <label>Subject<input id="t_subject" value="${escapeHtml(t.subject)}"></label>
+    <label>HTML Body<textarea id="t_html_body" rows="10">${escapeHtml(t.html_body)}</textarea></label>
+    <div class="grid4">
+      <label>Header<input type="color" id="t_header" value="${t.header_color||'#0b8043'}"></label>
+      <label>Button<input type="color" id="t_button" value="${t.button_color||'#1a73e8'}"></label>
+      <label>Text<input type="color" id="t_text"   value="${t.text_color||'#202124'}"></label>
+      <label>Bg<input type="color"    id="t_bg"     value="${t.background_color||'#ffffff'}"></label>
+    </div>
+    <div class="actions">
+      <button onclick="saveCurrentTemplate()">Save</button>
+      <button onclick="duplicateCurrentTemplate()">Duplicate</button>
+      <button class="danger" onclick="deleteCurrentTemplate()">Delete</button>
+    </div>`;
+  ['t_subject','t_html_body','t_header','t_button','t_text','t_bg'].forEach(id=>{
+    document.getElementById(id).addEventListener('input', renderPreview);
+  });
+  renderPreview();
+}
+
+function renderPreview() {
+  const t=selectedTemplate(); if(!t) return;
+  const subject=(document.getElementById('t_subject')||{}).value||t.subject;
+  const html=(document.getElementById('t_html_body')||{}).value||t.html_body;
+  const header=(document.getElementById('t_header')||{}).value||t.header_color;
+  const button=(document.getElementById('t_button')||{}).value||t.button_color;
+  const text=(document.getElementById('t_text')||{}).value||t.text_color;
+  const bg=(document.getElementById('t_bg')||{}).value||t.background_color;
+  document.getElementById('preview_subject').textContent=subject.replace(/\{\{.*?\}\}/g,'[var]');
+  document.getElementById('preview_html').innerHTML=`
+    <div style="padding:12px;background:${bg};color:${text};border-radius:8px;border:1px solid #ddd;">
+      <div style="background:${header};color:#fff;padding:10px;border-radius:6px;font-weight:600;">Preview</div>
+      <div style="padding:10px;">${html}</div>
+      <button style="background:${button};color:#fff;border:none;border-radius:6px;padding:8px 12px;">Open Calendar</button>
+    </div>`;
+}
+
+function pickTemplate(id){ state.selectedTemplateId=id; renderTemplateList(); renderTemplateEditor(); }
+
+async function newTemplate() {
+  try {
+    const saved=await runServer('saveTemplate',{template_name:'New Template',subject:'Subject for {{event_title}}',
+      html_body:'<p>Hello {{name}}, this is regarding {{event_title}}.</p>',
+      header_color:'#0b8043',button_color:'#1a73e8',text_color:'#202124',background_color:'#ffffff',active:'true'});
+    state.templates.unshift(saved); state.selectedTemplateId=saved.template_id;
+    renderTemplateList(); renderTemplateEditor(); toast('Template created');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function saveCurrentTemplate() {
+  const t=selectedTemplate(); if(!t) return;
+  try {
+    const saved=await runServer('saveTemplate',{template_id:t.template_id,
+      template_name:document.getElementById('t_name').value,
+      subject:document.getElementById('t_subject').value,
+      html_body:document.getElementById('t_html_body').value,
+      header_color:document.getElementById('t_header').value,
+      button_color:document.getElementById('t_button').value,
+      text_color:document.getElementById('t_text').value,
+      background_color:document.getElementById('t_bg').value,
+      active:document.getElementById('t_active').value});
+    state.templates=state.templates.map(x=>x.template_id===saved.template_id?saved:x);
+    renderTemplateList(); renderTemplateEditor(); toast('Saved');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function duplicateCurrentTemplate() {
+  const t=selectedTemplate(); if(!t) return;
+  try {
+    const copy=await runServer('duplicateTemplate',t.template_id);
+    state.templates.unshift(copy); state.selectedTemplateId=copy.template_id;
+    renderTemplateList(); renderTemplateEditor(); toast('Duplicated');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function deleteCurrentTemplate() {
+  const t=selectedTemplate(); if(!t) return;
+  if(!confirm('Delete this template?')) return;
+  try {
+    await runServer('deleteTemplate',t.template_id);
+    state.templates=state.templates.filter(x=>x.template_id!==t.template_id);
+    state.selectedTemplateId=state.templates[0]?state.templates[0].template_id:null;
+    renderTemplateList(); renderTemplateEditor(); renderColorMapping(); toast('Deleted');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function sendTest() {
+  const t=selectedTemplate(); if(!t) return;
+  const testEmail=document.getElementById('test_email').value.trim();
+  if(!testEmail) return toast('Enter a test email',true);
+  try {
+    const r=await runServer('sendTestEmail',{template_id:t.template_id,
+      test_email:testEmail, test_name:document.getElementById('test_name').value.trim(),
+      event_title:'Test Event from Dashboard'});
+    toast(r.ok?'Test email sent':'Test failed: '+r.message, !r.ok);
+    state.logs=await runServer('listSendLogs',200); renderLogs();
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── Color Mapping (upgraded) ──────────────────────────────────
+function renderColorMapping() {
+  const host=document.getElementById('color_cards');
+  const tplOpts=state.templates.map(t=>`<option value="${t.template_id}">${escapeHtml(t.template_name)}</option>`).join('');
+  const jnyOpts=state.journeys.map(j=>`<option value="${j.journey_id}">${escapeHtml(j.journey_name)}</option>`).join('');
+  host.innerHTML=state.eventColors.map(c=>`
+    <div class="color-card">
+      <div class="swatch" style="background:${c.hex}" title="${escapeHtml(c.key)}"></div>
+      <div>
+        <div class="swatch-title">${escapeHtml(c.label)}</div>
+        <div class="swatch-sub">${escapeHtml(c.key)}</div>
+        <label style="margin-bottom:4px;">Journey
+          <select id="mapj_${c.key}"><option value="">-- No journey --</option>${jnyOpts}</select>
+        </label>
+        <label style="margin-bottom:4px;">Legacy Template
+          <select id="mapt_${c.key}"><option value="">-- No template --</option>${tplOpts}</select>
+        </label>
+        <button style="margin-top:6px;" onclick="saveColorMap('${c.enumValue}','${escapeHtml(c.label)}','mapt_${c.key}','mapj_${c.key}')">Save</button>
+      </div>
+    </div>`).join('');
+
+  state.eventColors.forEach(c=>{
+    const rule=state.colorRules.find(r=>String(r.event_color)===String(c.enumValue)&&String(r.active)==='true');
+    if (rule) {
+      const jEl=document.getElementById('mapj_'+c.key), tEl=document.getElementById('mapt_'+c.key);
+      if (jEl) jEl.value=rule.journey_id||'';
+      if (tEl) tEl.value=rule.template_id||'';
+    }
+  });
+}
+
+async function saveColorMap(enumValue, label, tSelectId, jSelectId) {
+  try {
+    const templateId=document.getElementById(tSelectId).value;
+    const journeyId =document.getElementById(jSelectId).value;
+    const calendarId=document.getElementById('calendar_id').value.trim()||'primary';
+    const existing  =state.colorRules.find(r=>String(r.event_color)===String(enumValue)&&String(r.calendar_id)===calendarId);
+    if (!templateId && !journeyId) {
+      if (existing) await runServer('deleteColorRule', existing.rule_id);
+    } else {
+      await runServer('saveColorRule',{ calendar_id:calendarId, event_color:enumValue,
+        event_color_label:label, template_id:templateId, journey_id:journeyId, active:'true' });
+    }
+    state.colorRules=await runServer('listColorRules');
+    renderColorMapping(); toast('Color mapping updated');
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── Logs ─────────────────────────────────────────────────────
+function renderLogs() {
+  const host=document.getElementById('logs_table');
+  if (!state.logs.length){ host.innerHTML='<tr><td colspan="7">No log entries.</td></tr>'; return; }
+  host.innerHTML=state.logs.map(l=>`<tr>
+    <td>${escapeHtml(l.timestamp)}</td>
+    <td>${escapeHtml(l.event_title)}</td>
+    <td>${escapeHtml(l.recipient)}</td>
+    <td>${escapeHtml(l.template_id)}</td>
+    <td>${escapeHtml(l.subject)}</td>
+    <td>${escapeHtml(l.status)}</td>
+    <td>${escapeHtml(l.message)}</td>
+  </tr>`).join('');
+}
+
+// ── Journey Manager ───────────────────────────────────────────
+function getSelectedJourneySteps() {
+  const j=selectedJourney(); if(!j) return [];
+  try { const s=JSON.parse(j.steps_json||'[]'); return Array.isArray(s)?s:[]; } catch(e){ return []; }
+}
+
+function renderJourneyList() {
+  const host=document.getElementById('journey_list');
+  if (!state.journeys.length){ host.innerHTML='<div class="empty">No journeys yet.</div>'; return; }
+  host.innerHTML=state.journeys.map(j=>{
+    let steps=0; try{ steps=JSON.parse(j.steps_json||'[]').length; }catch(e){}
+    return `<button class="journey-item ${String(j.journey_id)===String(state.selectedJourneyId)?'sel':''}" onclick="pickJourney('${j.journey_id}')">
+      <div class="journey-item-name">${escapeHtml(j.journey_name)}</div>
+      <div class="journey-item-meta">${steps} step${steps!==1?'s':''} · ${String(j.active)==='true'?'Active':'Inactive'}</div>
+    </button>`;
+  }).join('');
+}
+
+function renderJourneyEditor() {
+  const host=document.getElementById('journey_editor');
+  const j=selectedJourney();
+  if (!j){ host.innerHTML='<div class="empty">Select a journey or create a new one.</div>'; return; }
+
+  const tplOpts=state.templates.map(t=>`<option value="${t.template_id}">${escapeHtml(t.template_name)}</option>`).join('');
+
+  const stepsHtml=state.journeySteps.map((s,i)=>`
+    <div class="journey-step-block">
+      <div class="journey-step-header">
+        <strong>Step ${i+1}${i===0?' (sends on enrollment after delay)':''}</strong>
+        <button class="danger" style="width:auto;padding:4px 10px;font-size:12px;" onclick="removeStep(${i})">Remove</button>
+      </div>
+      <label>Template<select id="js_tpl_${i}"><option value="">-- Select template --</option>${tplOpts}</select></label>
+      <div class="grid2">
+        <label>Delay Days<input type="number" id="js_days_${i}" value="${s.delay_days||0}" min="0"></label>
+        <label>Delay Hours<input type="number" id="js_hours_${i}" value="${s.delay_hours||0}" min="0"></label>
+      </div>
+      <label>Subject Override <span style="font-size:11px;">(optional — overrides template subject)</span>
+        <input id="js_subj_${i}" placeholder="Leave blank to use template subject" value="${escapeHtml(s.subject_override||'')}">
+      </label>
+      <label>Step Label<input id="js_desc_${i}" placeholder="e.g. Welcome email" value="${escapeHtml(s.description||'')}"></label>
+    </div>`).join('');
+
+  host.innerHTML=`
+    <div class="grid2">
+      <label>Journey Name<input id="je_name" value="${escapeHtml(j.journey_name)}"></label>
+      <label>Active<select id="je_active">
+        <option value="true" ${String(j.active)==='true'?'selected':''}>true</option>
+        <option value="false" ${String(j.active)==='false'?'selected':''}>false</option>
+      </select></label>
+    </div>
+    <label>Description<input id="je_desc" value="${escapeHtml(j.description||'')}"></label>
+    <div id="je_steps">${stepsHtml}</div>
+    <div class="toolbar" style="margin:10px 0;">
+      <button onclick="addStep()">+ Add Step</button>
+    </div>
+    <div class="actions">
+      <button onclick="saveCurrentJourney()">Save Journey</button>
+      <button class="danger" onclick="deleteCurrentJourney()">Delete Journey</button>
+    </div>`;
+
+  // Restore selected template values
+  state.journeySteps.forEach((s,i)=>{
+    const el=document.getElementById('js_tpl_'+i);
+    if (el && s.template_id) el.value=s.template_id;
+  });
+}
+
+function pickJourney(id) {
+  state.selectedJourneyId=id;
+  state.journeySteps=getSelectedJourneySteps();
+  renderJourneyList(); renderJourneyEditor();
+}
+
+function addStep() {
+  state.journeySteps.push({ step_index:state.journeySteps.length, template_id:'', delay_days:1, delay_hours:0, subject_override:'', description:'' });
+  renderJourneyEditor();
+}
+
+function removeStep(idx) {
+  state.journeySteps.splice(idx,1);
+  state.journeySteps.forEach((s,i)=>{ s.step_index=i; });
+  renderJourneyEditor();
+}
+
+function collectStepsFromDom() {
+  return state.journeySteps.map((_,i)=>({
+    step_index:      i,
+    template_id:     (document.getElementById('js_tpl_'+i)||{}).value||'',
+    delay_days:      Number((document.getElementById('js_days_'+i)||{}).value)||0,
+    delay_hours:     Number((document.getElementById('js_hours_'+i)||{}).value)||0,
+    subject_override:(document.getElementById('js_subj_'+i)||{}).value||'',
+    description:     (document.getElementById('js_desc_'+i)||{}).value||''
+  }));
+}
+
+async function newJourney() {
+  try {
+    const saved=await runServer('saveJourney',{ journey_name:'New Journey',
+      description:'', steps:[{ step_index:0, template_id:state.templates[0]?state.templates[0].template_id:'',
+        delay_days:0, delay_hours:0, subject_override:'', description:'Welcome email' }], active:'true' });
+    state.journeys.unshift(saved); state.selectedJourneyId=saved.journey_id;
+    state.journeySteps=saved.steps||[];
+    renderJourneyList(); renderJourneyEditor(); toast('Journey created');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function saveCurrentJourney() {
+  const j=selectedJourney(); if(!j) return;
+  try {
+    const steps=collectStepsFromDom();
+    const saved=await runServer('saveJourney',{
+      journey_id:   j.journey_id,
+      journey_name: document.getElementById('je_name').value,
+      description:  document.getElementById('je_desc').value,
+      active:       document.getElementById('je_active').value,
+      steps
+    });
+    state.journeys=state.journeys.map(x=>x.journey_id===saved.journey_id?saved:x);
+    state.journeySteps=saved.steps||[];
+    renderJourneyList(); renderJourneyEditor(); renderColorMapping(); toast('Journey saved');
+  } catch(e){ toast(e.message,true); }
+}
+
+async function deleteCurrentJourney() {
+  const j=selectedJourney(); if(!j) return;
+  if(!confirm('Delete journey "'+j.journey_name+'"? This cannot be undone.')) return;
+  try {
+    await runServer('deleteJourney', j.journey_id);
+    state.journeys=state.journeys.filter(x=>x.journey_id!==j.journey_id);
+    state.selectedJourneyId=state.journeys[0]?state.journeys[0].journey_id:null;
+    state.journeySteps=getSelectedJourneySteps();
+    renderJourneyList(); renderJourneyEditor(); renderColorMapping(); toast('Journey deleted');
+  } catch(e){ toast(e.message,true); }
+}
+
+// ── Customer Lookup ───────────────────────────────────────────
+async function lookupCustomerClick() {
+  const email=document.getElementById('customer_search').value.trim();
+  if (!email) return toast('Enter an email address',true);
+  try {
+    const states=await runServer('lookupCustomer', email);
+    renderCustomerResult(states, email);
+  } catch(e){ toast(e.message,true); }
+}
+
+function renderCustomerResult(states, email) {
+  const host=document.getElementById('customer_result');
+  if (!states||!states.length){
+    host.innerHTML=`<div class="empty">No journey records found for ${escapeHtml(email)}.</div>
+      <div style="margin-top:10px;">${renderManualEnrollForm(email)}</div>`;
+    return;
+  }
+
+  const jnyOpts=state.journeys.map(j=>`<option value="${j.journey_id}">${escapeHtml(j.journey_name)}</option>`).join('');
+  const cards=states.map(s=>`
+    <div class="customer-state-card">
+      <div class="customer-state-header">
+        <strong>${escapeHtml(s.customer_name||s.customer_email)}</strong>
+        ${badgeHtml(s.current_status)}
+        <span style="font-size:12px;color:#6b7280;">${escapeHtml(s.journey_name||s.current_journey_id)}</span>
+        <span style="font-size:11px;color:#9ca3af;">Enrolled: ${escapeHtml(String(s.enrolled_at).split('T')[0])}</span>
+      </div>
+      <div style="font-size:12px;color:#6b7280;">
+        Step: ${Number(s.last_email_sent_step)+1} of ${s.journey_step_count||'?'} sent &nbsp;|&nbsp;
+        Next send: ${s.next_send_at?escapeHtml(String(s.next_send_at).replace('T',' ').slice(0,16)):'—'} &nbsp;|&nbsp;
+        Override: ${String(s.manual_override)==='true'?'ON':'off'}
+      </div>
+      <div class="state-controls">
+        ${String(s.current_status)==='paused'
+          ? `<button onclick="resumeClick('${s.state_id}')">Resume</button>`
+          : `<button onclick="pauseClick('${s.state_id}')" ${['active','pending'].indexOf(s.current_status)<0?'disabled':''}>Pause</button>`}
+        <button class="danger" onclick="cancelClick('${s.state_id}')" ${['active','pending','paused'].indexOf(s.current_status)<0?'disabled':''}>Cancel</button>
+        <select id="sw_${s.state_id}" style="width:auto;min-width:180px;">
+          <option value="">-- Switch to journey --</option>${jnyOpts}
+        </select>
+        <button class="warn" onclick="switchClick('${s.state_id}')">Switch</button>
+        <button onclick="toggleOverride('${s.state_id}','${String(s.manual_override)==='true'?'false':'true'}')"
+          style="background:${String(s.manual_override)==='true'?'#374151':'#6b7280'};">
+          Override: ${String(s.manual_override)==='true'?'ON':'OFF'}
+        </button>
+      </div>
+    </div>`).join('');
+
+  host.innerHTML=cards+`<div style="margin-top:12px;">${renderManualEnrollForm(email)}</div>`;
+}
+
+function renderManualEnrollForm(email) {
+  const jnyOpts=state.journeys.map(j=>`<option value="${j.journey_id}">${escapeHtml(j.journey_name)}</option>`).join('');
+  return `<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+    <strong style="font-size:13px;">Manual Enroll:</strong>
+    <select id="manual_enroll_journey" style="width:auto;min-width:200px;">
+      <option value="">-- Select journey --</option>${jnyOpts}
+    </select>
+    <input id="manual_enroll_name" placeholder="Customer name (optional)" style="width:200px;">
+    <button style="width:auto;" onclick="manualEnrollClick('${escapeHtml(email)}')">Enroll</button>
+  </div>`;
+}
+
+async function pauseClick(stateId) {
+  try { await runServer('pauseCustomerJourney',stateId); toast('Paused'); await refreshCustomerResult(); }
+  catch(e){ toast(e.message,true); }
+}
+
+async function resumeClick(stateId) {
+  try { await runServer('resumeCustomerJourney',stateId); toast('Resumed'); await refreshCustomerResult(); }
+  catch(e){ toast(e.message,true); }
+}
+
+async function cancelClick(stateId) {
+  if(!confirm('Cancel this journey?')) return;
+  try { await runServer('cancelCustomerJourney',stateId); toast('Cancelled'); await refreshCustomerResult(); }
+  catch(e){ toast(e.message,true); }
+}
+
+async function switchClick(stateId) {
+  const newId=document.getElementById('sw_'+stateId).value;
+  if (!newId) return toast('Select a journey to switch to',true);
+  if(!confirm('Switch journey?')) return;
+  try { await runServer('switchCustomerJourney',{state_id:stateId, new_journey_id:newId}); toast('Switched'); await refreshCustomerResult(); }
+  catch(e){ toast(e.message,true); }
+}
+
+async function toggleOverride(stateId, value) {
+  try { await runServer('setManualOverride',{state_id:stateId, value}); toast('Override updated'); await refreshCustomerResult(); }
+  catch(e){ toast(e.message,true); }
+}
+
+async function manualEnrollClick(email) {
+  const journeyId=document.getElementById('manual_enroll_journey').value;
+  const name=document.getElementById('manual_enroll_name').value.trim();
+  if (!journeyId) return toast('Select a journey',true);
+  try {
+    const r=await runServer('enrollCustomer',{ customerEmail:email, customerName:name||email.split('@')[0], journeyId, actor:'admin' });
+    toast(r.ok?'Enrolled successfully':'Enrollment blocked: '+r.message, !r.ok);
+    await refreshCustomerResult();
+  } catch(e){ toast(e.message,true); }
+}
+
+async function refreshCustomerResult() {
+  const email=document.getElementById('customer_search').value.trim();
+  if (!email) return;
+  try {
+    const states=await runServer('lookupCustomer',email);
+    renderCustomerResult(states,email);
+  } catch(e){}
+}
+
+window.addEventListener('DOMContentLoaded', loadDashboard);
+</script>
